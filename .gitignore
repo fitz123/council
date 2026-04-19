@@ -1,0 +1,18 @@
+# Binaries
+/council
+/bin/
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+
+# Session artifacts (if run from repo root)
+/.council/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
