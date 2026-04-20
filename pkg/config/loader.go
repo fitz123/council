@@ -137,6 +137,17 @@ func decodeStrict(r io.Reader, out *yamlProfile) error {
 	if err := dec.Decode(out); err != nil {
 		return err
 	}
+	// v1 profiles are single-document. A trailing `---\neffort: bogus`
+	// would otherwise silently bypass KnownFields strictness, so require
+	// EOF after the first document.
+	var extra yaml.Node
+	err := dec.Decode(&extra)
+	if err == nil {
+		return fmt.Errorf("unexpected additional YAML document (profiles must be single-document)")
+	}
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
 	return nil
 }
 

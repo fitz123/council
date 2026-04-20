@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,28 @@ var (
 	ErrJudgeFailed  = errors.New("orchestrator: judge failed after retry")
 	ErrInterrupted  = errors.New("orchestrator: interrupted")
 )
+
+// Validate checks that every executor name referenced by the profile is
+// registered. Called by cmd/council before Session.Create so a typo like
+// `executor: calude-code` fails fast with exit 1 (config error) instead
+// of materialising a session folder and surfacing as a runtime expert
+// failure (which could even pass quorum if another expert succeeds, or
+// show up as exit 3 "judge_failed" for the judge case).
+func Validate(p *config.Profile) error {
+	var missing []string
+	if _, err := executor.Get(p.Judge.Executor); err != nil {
+		missing = append(missing, fmt.Sprintf("judge uses unknown executor %q", p.Judge.Executor))
+	}
+	for _, e := range p.Experts {
+		if _, err := executor.Get(e.Executor); err != nil {
+			missing = append(missing, fmt.Sprintf("expert %q uses unknown executor %q", e.Name, e.Executor))
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("profile %q: %s", p.Name, strings.Join(missing, "; "))
+	}
+	return nil
+}
 
 // timestampLayout matches docs/design/v1.md §6 example
 // ("2026-04-19T17:02:14Z") — RFC3339 with colon-separated time (the

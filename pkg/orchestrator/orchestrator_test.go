@@ -474,6 +474,44 @@ func TestRun_UnknownExecutor(t *testing.T) {
 	}
 }
 
+// TestValidate covers the pre-flight executor-registration check: a
+// typo in a profile's executor name must be caught before any session
+// is created, with the role + name surfaced so the operator can fix it.
+func TestValidate(t *testing.T) {
+	register(t, &stubExec{name: "real", on: writeOK("OUT")})
+
+	t.Run("all known", func(t *testing.T) {
+		p := newTestProfile("real", []string{"a", "b"}, 0)
+		if err := Validate(p); err != nil {
+			t.Errorf("Validate: %v, want nil", err)
+		}
+	})
+
+	t.Run("unknown expert executor", func(t *testing.T) {
+		p := newTestProfile("real", []string{"a"}, 0)
+		p.Experts[0].Executor = "typo"
+		err := Validate(p)
+		if err == nil {
+			t.Fatal("Validate: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "typo") || !strings.Contains(err.Error(), "a") {
+			t.Errorf("err = %v, want mention of expert name and bad executor", err)
+		}
+	})
+
+	t.Run("unknown judge executor", func(t *testing.T) {
+		p := newTestProfile("real", []string{"a"}, 0)
+		p.Judge.Executor = "judge-typo"
+		err := Validate(p)
+		if err == nil {
+			t.Fatal("Validate: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "judge-typo") || !strings.Contains(err.Error(), "judge") {
+			t.Errorf("err = %v, want mention of judge role and bad executor", err)
+		}
+	})
+}
+
 // TestRunWithFailRetry_Counts verifies retry-counter semantics
 // independently of the full pipeline (0 retries on first-try success, N
 // on N failures before success, cap at maxRetries).

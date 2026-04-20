@@ -130,8 +130,15 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		return exitConfigError
 	}
 
-	id := session.NewID(time.Now())
-	sess, err := session.Create(cwd, id, profile, question)
+	// Fail fast on executor typos. Without this check, a bad executor name
+	// leaks through as a runtime "failed" expert (could even pass quorum)
+	// or as exit 3 for the judge; both should be exit 1.
+	if err := orchestrator.Validate(profile); err != nil {
+		fmt.Fprintf(stderr, "council: %v\n", err)
+		return exitConfigError
+	}
+
+	sess, err := createSession(cwd, profile, question)
 	if err != nil {
 		fmt.Fprintf(stderr, "council: create session: %v\n", err)
 		return exitConfigError
@@ -172,6 +179,27 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		fmt.Fprintf(stderr, "council: %v\n", err)
 		return exitConfigError
 	}
+}
+
+// createSession allocates a session folder, retrying on os.ErrExist so a
+// NewID petname collision or a leftover stale directory does not overwrite
+// the earlier session's artifacts. The retry budget is tiny because
+// collisions are ~10^-9 per second — three attempts is overwhelming.
+func createSession(cwd string, profile *config.Profile, question string) (*session.Session, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		id := session.NewID(time.Now())
+		sess, err := session.Create(cwd, id, profile, question)
+		if err == nil {
+			return sess, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("session id collided %d times: %w", maxAttempts, lastErr)
 }
 
 // readQuestion returns the question text for the positional argument. A

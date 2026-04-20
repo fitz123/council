@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +102,24 @@ func TestCreate_ParallelDistinctFolders(t *testing.T) {
 			t.Fatalf("duplicate session path: %s", s.Path)
 		}
 		seen[s.Path] = true
+	}
+}
+
+// TestCreate_RejectsExistingSessionDir guards the exclusive-creation
+// invariant: if the session root already exists (stale folder, or NewID
+// collision), Create must return os.ErrExist rather than overwriting
+// question.md / profile.snapshot.yaml in the old session.
+func TestCreate_RejectsExistingSessionDir(t *testing.T) {
+	cwd := t.TempDir()
+	id := NewID(time.Now())
+	sessionPath := filepath.Join(cwd, ".council", "sessions", id)
+	if err := os.MkdirAll(sessionPath, 0o755); err != nil {
+		t.Fatalf("pre-create session dir: %v", err)
+	}
+	if _, err := Create(cwd, id, testProfile(t), "q"); err == nil {
+		t.Fatalf("Create: expected error for existing session dir, got nil")
+	} else if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("Create: err = %v, want os.ErrExist", err)
 	}
 }
 

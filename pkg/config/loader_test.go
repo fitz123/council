@@ -323,6 +323,28 @@ max_retries: 0
 			wantSub: "version",
 		},
 		{
+			name: "extra YAML document bypass attempt",
+			yaml: `version: 1
+name: default
+judge:
+  executor: claude-code
+  model: opus
+  prompt_file: prompts/judge.md
+  timeout: 300s
+experts:
+  - name: independent
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+---
+effort: bogus
+`,
+			wantSub: "additional YAML document",
+		},
+		{
 			name: "missing prompt file on disk",
 			yaml: `version: 1
 name: default

@@ -28,6 +28,16 @@ type Session struct {
 // before each expert run.
 func Create(cwd, id string, profile *config.Profile, question string) (*Session, error) {
 	root := filepath.Join(cwd, ".council", "sessions", id)
+	// Ensure the ancestors exist, then create the session root exclusively
+	// so a collision (NewID clash, or a stale folder from a prior run) is
+	// surfaced as os.ErrExist instead of silently overwriting artifacts.
+	// Callers (cmd/council) retry NewID on ErrExist.
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", filepath.Dir(root), err)
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", root, err)
+	}
 	expertsRoot := filepath.Join(root, "rounds", "1", "experts")
 	judgeRoot := filepath.Join(root, "rounds", "1", "judge")
 	for _, d := range []string{expertsRoot, judgeRoot} {

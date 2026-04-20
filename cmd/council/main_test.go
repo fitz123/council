@@ -272,6 +272,38 @@ func TestRun_Verbose(t *testing.T) {
 	}
 }
 
+// TestRun_UnknownExecutor_ExitsConfigError: a profile referencing an
+// executor that is not registered must exit 1 (config error) before any
+// session folder is created, not surface as a runtime expert failure.
+func TestRun_UnknownExecutor_ExitsConfigError(t *testing.T) {
+	cwd := withCouncilDir(t, t.TempDir())
+	t.Chdir(cwd)
+	// Register an executor under a name the profile does NOT use — the
+	// profile says "claude-code" but the registry only has "other".
+	executor.ResetForTest()
+	executor.Register(&stubExec{
+		name:     "other",
+		onExpert: writeStdout("X"),
+		onJudge:  writeStdout("X"),
+	})
+	t.Cleanup(func() { executor.ResetForTest() })
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"q"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitConfigError {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfigError, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "claude-code") {
+		t.Errorf("stderr missing bad executor name: %q", stderr.String())
+	}
+	// No session folder should have been created — validation runs before
+	// session.Create.
+	sessions, _ := filepath.Glob(".council/sessions/*")
+	if len(sessions) != 0 {
+		t.Errorf("expected no session folders, got %d: %v", len(sessions), sessions)
+	}
+}
+
 // TestRun_QuorumFailed: every expert fails, quorum unmet → exit 2 and
 // the stderr hint points at verdict.json. Verdict.json is on disk with
 // status=quorum_failed.
