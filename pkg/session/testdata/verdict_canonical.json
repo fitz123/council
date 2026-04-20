@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "session_id": "2026-04-19T17-02-14Z-fizzy-jingling-quokka",
+  "session_path": "./.council/sessions/2026-04-19T17-02-14Z-fizzy-jingling-quokka",
+  "profile": "default",
+  "question": "what is 2+2?",
+  "answer": "Four. (Sample synthesis.)",
+  "status": "ok",
+  "rounds": [
+    {
+      "experts": [
+        {
+          "name": "independent",
+          "executor": "claude-code",
+          "model": "sonnet",
+          "status": "ok",
+          "exit_code": 0,
+          "retries": 0,
+          "duration_seconds": 17.3
+        },
+        {
+          "name": "critic",
+          "executor": "claude-code",
+          "model": "sonnet",
+          "status": "ok",
+          "exit_code": 0,
+          "retries": 0,
+          "duration_seconds": 19.1
+        }
+      ],
+      "judge": {
+        "executor": "claude-code",
+        "model": "opus",
+        "exit_code": 0,
+        "retries": 0,
+        "duration_seconds": 14.1
+      }
+    }
+  ],
+  "started_at": "2026-04-19T17:02:14Z",
+  "ended_at": "2026-04-19T17:02:45Z",
+  "duration_seconds": 31.4
+}
