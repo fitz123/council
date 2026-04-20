@@ -148,6 +148,23 @@ func TestRun_UnknownFlag(t *testing.T) {
 	}
 }
 
+// TestRun_NonDefaultProfileRejected exits 1 with a clear message when -p
+// names anything other than "default". v1 ships a single profile per
+// location; the flag exists to keep the surface stable for v2.
+func TestRun_NonDefaultProfileRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-p", "code-review", "q"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitConfigError {
+		t.Errorf("exit = %d, want %d", code, exitConfigError)
+	}
+	if !strings.Contains(stderr.String(), "code-review") {
+		t.Errorf("stderr missing bad profile name: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "not supported in v1") {
+		t.Errorf("stderr missing v1-limitation hint: %q", stderr.String())
+	}
+}
+
 // TestRun_MissingQuestion exits 1 when no positional is given.
 func TestRun_MissingQuestion(t *testing.T) {
 	var stdout, stderr bytes.Buffer

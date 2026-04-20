@@ -90,8 +90,7 @@ func LoadFile(path string) (*Profile, error) {
 		return nil, fmt.Errorf("parse %s: %w", abs, err)
 	}
 
-	baseDir := filepath.Dir(abs)
-	return buildProfile(&y, baseDir, readFileFS(os.DirFS(baseDir)), baseDir)
+	return buildProfile(&y, filepath.Dir(abs), os.ReadFile)
 }
 
 func decodeStrict(r io.Reader, out *yamlProfile) error {
@@ -105,14 +104,10 @@ func decodeStrict(r io.Reader, out *yamlProfile) error {
 
 // readFileFn reads the full contents of the prompt file at a path that is
 // either absolute or relative to some loader-specific base. Abstracted so the
-// embedded loader can reuse buildProfile.
+// embedded loader can reuse buildProfile with fs.ReadFile against embed.FS.
 type readFileFn func(absOrRel string) ([]byte, error)
 
-func readFileFS(_ any) readFileFn {
-	return func(p string) ([]byte, error) { return os.ReadFile(p) }
-}
-
-func buildProfile(y *yamlProfile, baseDir string, readFile readFileFn, resolveBase string) (*Profile, error) {
+func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Profile, error) {
 	if y.Version == 0 {
 		return nil, fmt.Errorf("missing required field: version")
 	}
@@ -154,7 +149,6 @@ func buildProfile(y *yamlProfile, baseDir string, readFile readFileFn, resolveBa
 		experts = append(experts, *r)
 	}
 
-	_ = baseDir // reserved for future use (e.g. include resolution)
 	return &Profile{
 		Version:    y.Version,
 		Name:       y.Name,

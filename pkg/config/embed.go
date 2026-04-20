@@ -31,5 +31,5 @@ func loadFromEmbedded() (*Profile, error) {
 		// separators via filepath.Join; normalise before dispatching.
 		return fs.ReadFile(defaults.FS, path.Clean(filepath.ToSlash(p)))
 	}
-	return buildProfile(&y, ".", read, ".")
+	return buildProfile(&y, ".", read)
 }

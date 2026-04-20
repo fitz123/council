@@ -13,6 +13,7 @@ import (
 
 	"github.com/fitz123/council/pkg/config"
 	"github.com/fitz123/council/pkg/executor"
+	"github.com/fitz123/council/pkg/runner"
 	"github.com/fitz123/council/pkg/session"
 )
 
@@ -514,6 +515,36 @@ func TestRunWithFailRetry_Counts(t *testing.T) {
 				t.Errorf("retries = %d, want %d", retries, tc.wantRetries)
 			}
 		})
+	}
+}
+
+// TestRunWithFailRetry_RateLimitShortCircuits asserts that an
+// ErrRateLimit surfaced by the runner is NOT retried at the orchestrator
+// layer. Rate-limit retries are runner-owned (plan Task 6 / design §10);
+// stacking a second orchestrator budget on top of the runner's budget
+// would violate that split. The stub returns ErrRateLimit on every call;
+// the orchestrator should call Execute exactly once even with a large
+// maxRetries budget.
+func TestRunWithFailRetry_RateLimitShortCircuits(t *testing.T) {
+	var calls int64
+	stub := &stubExec{
+		name: "stub",
+		on: func(_ context.Context, _ int64, _ executor.Request) (executor.Response, error) {
+			atomic.AddInt64(&calls, 1)
+			return executor.Response{}, runner.ErrRateLimit
+		},
+	}
+	register(t, stub)
+
+	_, err, retries := runWithFailRetry(context.Background(), "stub", 100, executor.Request{})
+	if !errors.Is(err, runner.ErrRateLimit) {
+		t.Fatalf("err = %v, want ErrRateLimit", err)
+	}
+	if retries != 0 {
+		t.Errorf("retries = %d, want 0 (orchestrator must not retry rate-limits)", retries)
+	}
+	if n := atomic.LoadInt64(&calls); n != 1 {
+		t.Errorf("calls = %d, want 1 (single attempt, no retry)", n)
 	}
 }
 

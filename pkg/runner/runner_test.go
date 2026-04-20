@@ -156,6 +156,30 @@ func TestRunFailRetriesUseMaxRetriesBudget(t *testing.T) {
 	}
 }
 
+// TestRunCtxCancelSkipsFailRetry asserts that a parent-context cancellation
+// short-circuits the fail-retry loop even with a generous MaxRetries.
+// Retrying a cancelled subprocess just respawns a child that will be killed
+// again by the same context — so the loop must treat context.Canceled /
+// DeadlineExceeded as terminal.
+func TestRunCtxCancelSkipsFailRetry(t *testing.T) {
+	out, errf := paths(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resp, err := Run(ctx, RunRequest{
+		Argv:       []string{"sh", "-c", "sleep 30"},
+		StdoutFile: out,
+		StderrFile: errf,
+		Timeout:    5 * time.Second,
+		MaxRetries: 5,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if resp.Retries != 0 {
+		t.Errorf("Retries = %d, want 0 (cancellation must not consume retry budget)", resp.Retries)
+	}
+}
+
 func TestRunRateLimitRetriesEvenWithMaxRetriesZero(t *testing.T) {
 	// Per design §10: rate-limit retries are runner-owned; even with
 	// MaxRetries=0, a 429 gets one retry (max_retries+1 total

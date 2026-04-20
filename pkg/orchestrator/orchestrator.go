@@ -38,6 +38,7 @@ import (
 	"github.com/fitz123/council/pkg/config"
 	"github.com/fitz123/council/pkg/executor"
 	"github.com/fitz123/council/pkg/prompt"
+	"github.com/fitz123/council/pkg/runner"
 	"github.com/fitz123/council/pkg/session"
 )
 
@@ -338,6 +339,14 @@ func runWithFailRetry(ctx context.Context, execName string, maxRetries int, req 
 			return resp, nil, attempt
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return resp, err, attempt
+		}
+		// Rate-limit retries are runner-owned (see package doc). If
+		// ErrRateLimit bubbles up here the runner's budget was already
+		// spent; retrying at the orchestrator layer would stack a second
+		// budget on top of the first and is explicitly excluded by
+		// plan §Task 6 + design §10.
+		if errors.Is(err, runner.ErrRateLimit) {
 			return resp, err, attempt
 		}
 		if attempt >= maxRetries {

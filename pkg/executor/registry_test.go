@@ -18,7 +18,7 @@ func (s stubExec) Execute(ctx context.Context, req Request) (Response, error) {
 }
 
 func TestRegisterAndGet(t *testing.T) {
-	Reset()
+	ResetForTest()
 	want := stubExec{name: "stub-a"}
 	Register(want)
 	got, err := Get("stub-a")
@@ -31,7 +31,7 @@ func TestRegisterAndGet(t *testing.T) {
 }
 
 func TestGetUnknownNamesAvailable(t *testing.T) {
-	Reset()
+	ResetForTest()
 	Register(stubExec{name: "stub-a"})
 	Register(stubExec{name: "stub-b"})
 	_, err := Get("nope")
@@ -51,7 +51,7 @@ func TestGetUnknownNamesAvailable(t *testing.T) {
 }
 
 func TestRegisterDuplicatePanics(t *testing.T) {
-	Reset()
+	ResetForTest()
 	Register(stubExec{name: "dup"})
 	defer func() {
 		r := recover()
@@ -66,7 +66,7 @@ func TestRegisterDuplicatePanics(t *testing.T) {
 }
 
 func TestRegisterNilPanics(t *testing.T) {
-	Reset()
+	ResetForTest()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("Register(nil) did not panic")
@@ -76,7 +76,7 @@ func TestRegisterNilPanics(t *testing.T) {
 }
 
 func TestRegisterEmptyNamePanics(t *testing.T) {
-	Reset()
+	ResetForTest()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("Register with empty Name did not panic")

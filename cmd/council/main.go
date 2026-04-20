@@ -116,12 +116,19 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		return exitConfigError
 	}
 
+	// v1 ships a single profile per location (default.yaml). Reject any
+	// other profile name up-front so a caller passing -p foo does not
+	// silently run against default.yaml. Multi-profile is a v2 hook.
+	if profileName != "default" {
+		fmt.Fprintf(stderr, "council: profile %q not supported in v1 (only \"default\" is available)\n", profileName)
+		return exitConfigError
+	}
+
 	profile, source, err := config.Load(cwd)
 	if err != nil {
 		fmt.Fprintf(stderr, "council: load config: %v\n", err)
 		return exitConfigError
 	}
-	_ = profileName // v1 ships one profile file per location; -p is a future hook.
 
 	id := session.NewID(time.Now())
 	sess, err := session.Create(cwd, id, profile, question)
@@ -200,7 +207,7 @@ func printHelp(w io.Writer) {
   council --help
 
 Flags:
-  -p, --profile NAME   Profile to use (default: "default").
+  -p, --profile NAME   Profile to use (default: "default"; v1 only accepts "default").
   -v, --verbose        Stream structured progress to stderr.
       --version        Print version and exit.
 

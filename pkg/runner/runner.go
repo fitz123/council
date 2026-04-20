@@ -124,7 +124,14 @@ func Run(ctx context.Context, req RunRequest) (RunResponse, error) {
 			}
 			continue
 		}
-		// ErrTimeout or ErrNonZeroExit (no rate-limit marker)
+		// ErrTimeout or ErrNonZeroExit (no rate-limit marker) — or a
+		// parent-ctx cancellation that surfaced as killReason above.
+		// Context cancellation must not consume retry budget: retrying a
+		// cancelled ctx just respawns a subprocess that will be killed
+		// again.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return resp, err
+		}
 		if failRetries >= req.MaxRetries {
 			return resp, err
 		}

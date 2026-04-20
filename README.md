@@ -67,11 +67,13 @@ Profiles are loaded from the first of:
 
 Schema, field semantics, and the canonical example live in [`docs/design/v1.md` §5](docs/design/v1.md). The validator strictly rejects unknown keys — anticipated v2 fields (`effort`, `notify_script`, prompt-file frontmatter) intentionally fail in v1.
 
-Select a non-default profile with `-p NAME`:
+`prompt_file` values are resolved relative to the config file's directory. If you write your own `./.council/default.yaml`, put the prompt markdown alongside it (e.g. `./.council/prompts/judge.md`) — the embedded defaults under [`defaults/`](defaults/) are a ready-made starting template.
 
-```
-council -p code-review "review this PR description: ..."
-```
+The `-p`/`--profile` flag is reserved for v2 multi-profile support; v1 accepts only `-p default` (its default value) and returns a config error for any other name. Running `council "..."` without `-p` is the intended form.
+
+### Environment
+
+council injects `CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000` into each `claude` subprocess so the judge has room to synthesise long answers. This overrides any value exported in your shell for child invocations only.
 
 ## Verbose mode
 
