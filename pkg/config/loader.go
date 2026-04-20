@@ -63,11 +63,11 @@ func Load(cwd string) (*Profile, string, error) {
 			return p, global, err
 		}
 	}
-	if embeddedBytes != nil {
-		p, err := loadFromEmbedded()
-		return p, SourceEmbedded, err
+	p, err := loadFromEmbedded()
+	if err != nil {
+		return nil, "", err
 	}
-	return nil, "", ErrNoConfig
+	return p, SourceEmbedded, nil
 }
 
 // LoadFile loads and validates a YAML profile at path. prompt_file values are

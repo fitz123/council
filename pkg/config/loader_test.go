@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -409,7 +408,12 @@ func TestLoad_PrecedenceGlobalWhenNoLocal(t *testing.T) {
 	}
 }
 
-func TestLoad_NoConfig(t *testing.T) {
+// TestLoad_FallsThroughToEmbedded covers the precedence-chain terminus: with
+// neither a cwd-local nor a user-global config file on disk, Load must resolve
+// the embedded profile and flag its source as SourceEmbedded. This replaces
+// the earlier ErrNoConfig expectation, which only held while Task 8 had not
+// yet wired up the //go:embed fallback.
+func TestLoad_FallsThroughToEmbedded(t *testing.T) {
 	local := t.TempDir()
 	home := t.TempDir() // empty
 
@@ -417,8 +421,17 @@ func TestLoad_NoConfig(t *testing.T) {
 	userHomeDir = func() (string, error) { return home, nil }
 	t.Cleanup(func() { userHomeDir = oldHome })
 
-	_, _, err := Load(local)
-	if !errors.Is(err, ErrNoConfig) {
-		t.Fatalf("want ErrNoConfig, got %v", err)
+	p, src, err := Load(local)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if src != SourceEmbedded {
+		t.Errorf("source = %q, want %q", src, SourceEmbedded)
+	}
+	if p.Name != "default" {
+		t.Errorf("Name = %q, want default", p.Name)
+	}
+	if len(p.Experts) != 2 {
+		t.Errorf("Experts = %d, want 2", len(p.Experts))
 	}
 }
