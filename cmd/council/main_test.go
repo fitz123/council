@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fitz123/council/pkg/executor"
+	"github.com/fitz123/council/pkg/session"
 )
 
 // stubExec is a copy-lite of the orchestrator's stubExec — we only need
@@ -406,5 +407,38 @@ func TestFlagParsing(t *testing.T) {
 				t.Errorf("exit = %d, want %d (stderr=%s)", got, tc.want, stderr.String())
 			}
 		})
+	}
+}
+
+// TestResolveVersion covers the -ldflags override path; the debug.BuildInfo
+// branch only fires under `go install` and is exercised in Post-Completion
+// manual verification.
+func TestResolveVersion(t *testing.T) {
+	orig := version
+	t.Cleanup(func() { version = orig })
+	version = "v1.2.3-test"
+	if got := resolveVersion(); got != "v1.2.3-test" {
+		t.Errorf("resolveVersion = %q, want v1.2.3-test", got)
+	}
+}
+
+// TestDisplaySource covers the three cases the verbose preamble renders:
+// the literal "embedded" sentinel, a config file inside the session's cwd
+// (relative), and a config file outside the cwd (absolute).
+func TestDisplaySource(t *testing.T) {
+	cwd := t.TempDir()
+	sessPath := filepath.Join(cwd, ".council", "sessions", "sess-id")
+	sess := &session.Session{Path: sessPath}
+
+	if got := displaySource("embedded", sess); got != "embedded" {
+		t.Errorf("embedded source: got %q, want embedded", got)
+	}
+	insideAbs := filepath.Join(cwd, ".council", "default.yaml")
+	if got := displaySource(insideAbs, sess); got != filepath.Join(".council", "default.yaml") {
+		t.Errorf("inside source: got %q, want .council/default.yaml", got)
+	}
+	outsideAbs := filepath.Join(t.TempDir(), "elsewhere.yaml")
+	if got := displaySource(outsideAbs, sess); got != outsideAbs {
+		t.Errorf("outside source: got %q, want %q (absolute passthrough)", got, outsideAbs)
 	}
 }
