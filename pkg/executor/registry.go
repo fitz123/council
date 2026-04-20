@@ -68,3 +68,14 @@ func reset() {
 	defer regMu.Unlock()
 	reg = map[string]Executor{}
 }
+
+// ResetForTest wipes the registry from code outside package executor.
+// It is the cross-package equivalent of Reset() in export_test.go:
+// tests in pkg/orchestrator and elsewhere register their stubs with
+// this, run their assertions, and rely on t.Cleanup to restore a clean
+// slate. Name begins with "ForTest" so linters (and humans) know it is
+// not production surface; linking this in a non-test path is a bug.
+//
+// It is not in export_test.go because _test.go files are only visible
+// to the package they live in — external tests cannot use them.
+func ResetForTest() { reset() }
