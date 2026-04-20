@@ -1,6 +1,6 @@
 # council v1 — Architectural Review
 
-**Scope:** Additive architectural critique of the v1 MVP spec (see `docs/spec/v1.md`). Not a rewrite — captures the systems-analysis reasoning behind the six ADRs in `docs/adr/`.
+**Scope:** Additive architectural critique of the v1 MVP spec (see `docs/design/v1.md`). Not a rewrite — captures the systems-analysis reasoning behind the six ADRs in `docs/adr/`.
 
 **Method:** Problem-space → solution-design → fitness functions → risk register.
 

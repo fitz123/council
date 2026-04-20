@@ -6,7 +6,7 @@
 
 Initial design considered separate directories for profiles, experts, and judges — one file per concept, reusable across profiles.
 
-For MVP (one profile, one expert, one judge), this adds ceremony without benefit:
+For MVP (one profile, two expert personas, one judge — see ADR-0005), this adds ceremony without benefit:
 
 - 5+ files for a trivially small configuration.
 - Three places to look when debugging a single run's config.
@@ -32,7 +32,7 @@ and a `profiles/` / `experts/` / `judges/` directory layout, with the flat form 
 
 ## Consequences
 
-- **(+)** Three files covers the MVP config (one YAML + two prompts).
+- **(+)** Four files cover the MVP config (one YAML + three prompts: independent, critic, judge).
 - **(+)** Debugging the exact config of a run is trivial — `cat profile.snapshot.yaml`.
 - **(−)** When the catalog of expert personas grows, the flat file bloats. The signal to migrate to directories is explicit (≥3 experts or ≥2 profiles).
 - **(−)** If a user manually splits into directories in v1, the loader won't see their files. Documented in README.

@@ -28,5 +28,5 @@ The constraint that stays "single" at MVP is the *CLI/model* dimension: Claude C
 - **(+)** Quorum logic is exercised under partial failure (1 of 2 succeeds → judge still synthesizes).
 - **(+)** Personas can be tuned independently via `prompt_file` without touching code or adding new CLIs.
 - **(+)** Executor-verification work (flag surface, rate-limit handling) stays scoped to one CLI for MVP.
-- **(−)** Rate-limit pressure is higher than with a single expert — two parallel calls against one subscription. Mitigated by the 429-distinct-from-timeout classification in `docs/spec/v1.md` §10.
+- **(−)** Rate-limit pressure is higher than with a single expert — two parallel calls against one subscription. Mitigated by the 429-distinct-from-timeout classification in `docs/design/v1.md` §10.
 - **(−)** Two personas shipping in defaults means two prompt files to maintain. Small cost; offset by the benefit of the MVP actually demonstrating synthesis.
