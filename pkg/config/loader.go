@@ -190,6 +190,10 @@ func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Pro
 		experts = append(experts, *r)
 	}
 
+	if y.Quorum > len(experts) {
+		return nil, fmt.Errorf("quorum %d exceeds expert count %d (every run would fail)", y.Quorum, len(experts))
+	}
+
 	return &Profile{
 		Version:    y.Version,
 		Name:       y.Name,

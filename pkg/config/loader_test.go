@@ -274,6 +274,26 @@ max_retries: 0
 			wantSub: "quorum",
 		},
 		{
+			name: "quorum exceeds expert count",
+			yaml: `version: 1
+name: default
+judge:
+  executor: claude-code
+  model: opus
+  prompt_file: prompts/judge.md
+  timeout: 300s
+experts:
+  - name: independent
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 2
+max_retries: 0
+`,
+			wantSub: "exceeds expert count",
+		},
+		{
 			name: "bad YAML syntax",
 			yaml: `version: 1
 name: default
