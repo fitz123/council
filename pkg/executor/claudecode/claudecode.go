@@ -108,9 +108,11 @@ func (c *ClaudeCode) Execute(ctx context.Context, req executor.Request) (executo
 		StderrFile: req.StderrFile,
 		Timeout:    req.Timeout,
 		// MaxRetries=0 — orchestrator owns fail-retry policy. Rate-limit
-		// retries still happen inside pkg/runner regardless of this
-		// value (see runner package doc).
-		MaxRetries: 0,
+		// retries still happen inside pkg/runner; the budget is
+		// req.MaxRetries+1 per design/v1.md §10 ("retry up to
+		// max_retries + 1 times").
+		MaxRetries:          0,
+		RateLimitMaxRetries: req.MaxRetries + 1,
 	})
 
 	out := executor.Response{

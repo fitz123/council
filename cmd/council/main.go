@@ -149,7 +149,11 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 
 	switch {
 	case err == nil:
-		// Normal-mode contract: stdout is the synthesis body, verbatim.
+		// Normal-mode stdout: the synthesis body, plus a trailing newline
+		// if the body didn't already end with one. The newline is purely
+		// terminal hygiene (so the next prompt doesn't land glued to the
+		// last line of output). Callers that need byte-exact synthesis
+		// should read rounds/1/judge/synthesis.md from the session folder.
 		fmt.Fprint(stdout, v.Answer)
 		if !strings.HasSuffix(v.Answer, "\n") {
 			fmt.Fprintln(stdout)

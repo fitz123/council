@@ -7,11 +7,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Snapshot serializes the resolved profile to dstPath as YAML. PromptFile
-// entries are written as-is (already absolute after Load); prompt bodies are
-// not inlined. Re-loading the snapshot reads the prompt files at their
-// absolute paths and yields a structurally equivalent Profile, provided the
-// referenced files have not changed.
+// Snapshot serializes the resolved profile to dstPath as YAML. Prompt bodies
+// are inlined verbatim under prompt_body so the snapshot is self-contained:
+// reload depends on neither the original prompt files (which the user may
+// edit later) nor the embedded FS (whose relative paths only resolve from
+// inside the binary). PromptFile is written alongside, purely as a record
+// of where the body was originally loaded from.
 func Snapshot(p *Profile, dstPath string) error {
 	y := yamlProfile{
 		Version:    p.Version,
@@ -40,6 +41,7 @@ func roleToYaml(r *RoleConfig) yamlRole {
 		Executor:   r.Executor,
 		Model:      r.Model,
 		PromptFile: r.PromptFile,
+		PromptBody: r.PromptBody,
 		Timeout:    r.Timeout.String(),
 	}
 }

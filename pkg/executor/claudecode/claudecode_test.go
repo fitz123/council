@@ -27,6 +27,7 @@ func writeStub(t *testing.T) string {
 	body := `#!/bin/sh
 echo "ARGV: $*"
 echo "TOKENS: ${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-unset}"
+echo "PARENT_ENV: ${COUNCIL_TEST_PARENT_ENV:-unset}"
 echo "STDIN_BEGIN"
 cat
 echo
@@ -39,6 +40,12 @@ echo "STDIN_END"
 }
 
 func TestExecuteHappyPath(t *testing.T) {
+	// Set a sentinel parent-env var before the Executor runs. If the
+	// implementation ever regresses to NOT using os.Environ (e.g. by
+	// replacing the env with only CLAUDE_CODE_MAX_OUTPUT_TOKENS), the
+	// sentinel won't reach the subprocess and the assertion below fails.
+	t.Setenv("COUNCIL_TEST_PARENT_ENV", "sentinel-value")
+
 	stub := writeStub(t)
 	c := &ClaudeCode{Binary: stub}
 
@@ -79,6 +86,13 @@ func TestExecuteHappyPath(t *testing.T) {
 	// to 64000 per design §7.
 	if !strings.Contains(gotStr, "TOKENS: 64000") {
 		t.Errorf("env not propagated: stdout = %q", gotStr)
+	}
+
+	// parent-env assertion: the executor appends its token-budget knob
+	// to os.Environ rather than replacing it, so PATH / HOME /
+	// ANTHROPIC_API_KEY / COUNCIL_TEST_PARENT_ENV all reach the child.
+	if !strings.Contains(gotStr, "PARENT_ENV: sentinel-value") {
+		t.Errorf("parent env not inherited: stdout = %q", gotStr)
 	}
 
 	// stdin assertion: prompt body must reach the subprocess verbatim.

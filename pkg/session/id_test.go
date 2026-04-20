@@ -52,7 +52,10 @@ func TestNewID_ConsecutiveCallsDiffer(t *testing.T) {
 func TestNewID_ParallelStable(t *testing.T) {
 	// Run NewID concurrently to assert no race in the underlying petname
 	// generator (math/rand global is documented thread-safe in Go 1.20+,
-	// but this test pins the contract).
+	// but this test pins the contract). Also assert uniqueness: a
+	// regression that seeded petname from a constant would produce
+	// duplicates AND pass the shape check, so a shape-only assertion
+	// would miss the bug.
 	const n = 64
 	now := time.Now().UTC()
 	ids := make([]string, n)
@@ -65,9 +68,14 @@ func TestNewID_ParallelStable(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+	seen := make(map[string]int, n)
 	for i, id := range ids {
 		if !idShape.MatchString(id) {
 			t.Fatalf("ids[%d]=%q does not match shape regex", i, id)
 		}
+		if dup, exists := seen[id]; exists {
+			t.Fatalf("duplicate id %q at indices %d and %d", id, dup, i)
+		}
+		seen[id] = i
 	}
 }

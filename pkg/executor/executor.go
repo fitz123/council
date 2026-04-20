@@ -36,12 +36,17 @@ type Executor interface {
 // vendor-agnostic short name ("haiku" / "sonnet" / "opus"); each
 // Executor implementation maps it to the CLI-side flag value (see
 // ClaudeCode.MapModel for the v1 mapping, which is identity).
+//
+// MaxRetries is the profile's max_retries value, passed through so the
+// executor can size its rate-limit retry budget per design/v1.md §10's
+// `max_retries + 1` rule. Fail-retry policy stays orchestrator-owned.
 type Request struct {
 	Prompt     string
 	Model      string
 	Timeout    time.Duration
 	StdoutFile string
 	StderrFile string
+	MaxRetries int
 }
 
 // Response is what Execute returns on a non-error completion. ExitCode

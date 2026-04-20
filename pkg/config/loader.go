@@ -4,13 +4,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// expertNameRE is the allowed character set for expert names. Names flow
+// through filepath.Join (pkg/session.Session.ExpertDir) and are embedded in
+// prompt delimiters (pkg/prompt.BuildJudge's `=== EXPERT: <name> ===`), so
+// anything outside `[a-zA-Z0-9_-]` risks path traversal or prompt confusion.
+// Must start with an alphanumeric to keep hidden-file shapes like ".hidden"
+// out of the session folder.
+var expertNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // ErrNoConfig is returned by Load when no config file is found at any of the
 // precedence locations and the embedded defaults are unavailable.
@@ -27,11 +37,19 @@ const SourceEmbedded = "embedded"
 // yamlRole is the wire format for one role. Kept separate from RoleConfig so
 // that yaml.v3's KnownFields rejects unknown keys at the wire layer while the
 // in-memory Profile can carry computed fields (PromptBody, absolute paths).
+//
+// Either prompt_file or prompt_body must be set. prompt_file is the editable
+// source-config form (path relative to the config file); prompt_body is the
+// frozen snapshot form (verbatim bytes inlined into the YAML so reload is
+// independent of the original prompt files). When both are present,
+// prompt_body wins — this lets profile.snapshot.yaml record the original
+// path for traceability while still being self-contained.
 type yamlRole struct {
 	Name       string `yaml:"name,omitempty"`
 	Executor   string `yaml:"executor"`
 	Model      string `yaml:"model"`
-	PromptFile string `yaml:"prompt_file"`
+	PromptFile string `yaml:"prompt_file,omitempty"`
+	PromptBody string `yaml:"prompt_body,omitempty"`
 	Timeout    string `yaml:"timeout"`
 }
 
@@ -53,16 +71,36 @@ type yamlProfile struct {
 // fallback), and any error.
 func Load(cwd string) (*Profile, string, error) {
 	local := filepath.Join(cwd, ".council", "default.yaml")
-	if _, err := os.Stat(local); err == nil {
+	switch _, err := os.Stat(local); {
+	case err == nil:
 		p, err := LoadFile(local)
 		return p, local, err
+	case !errors.Is(err, fs.ErrNotExist):
+		// Permission denied, broken path component, etc. — surface
+		// rather than silently falling through to a different source,
+		// which could run a profile the operator didn't intend.
+		return nil, "", fmt.Errorf("stat %s: %w", local, err)
 	}
-	if home, err := userHomeDir(); err == nil {
+	home, homeErr := userHomeDir()
+	switch {
+	case homeErr == nil:
 		global := filepath.Join(home, ".config", "council", "default.yaml")
-		if _, err := os.Stat(global); err == nil {
+		switch _, err := os.Stat(global); {
+		case err == nil:
 			p, err := LoadFile(global)
 			return p, global, err
+		case !errors.Is(err, fs.ErrNotExist):
+			return nil, "", fmt.Errorf("stat %s: %w", global, err)
 		}
+	case errors.Is(homeErr, os.ErrNotExist):
+		// No home dir at all (chroot, broken setup). Treat like "global
+		// config absent" and fall through to embedded.
+	default:
+		// $HOME unset under sudo, a race on the passwd DB, or some other
+		// UserHomeDir failure. Surface rather than silently running with
+		// embedded defaults: the operator who keeps a profile at
+		// ~/.config/council/default.yaml must see why it's being bypassed.
+		return nil, "", fmt.Errorf("resolve user home: %w", homeErr)
 	}
 	p, err := loadFromEmbedded()
 	if err != nil {
@@ -142,6 +180,9 @@ func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Pro
 		if r.Name == "" {
 			return nil, fmt.Errorf("experts[%d]: missing required field: name", i)
 		}
+		if !expertNameRE.MatchString(r.Name) {
+			return nil, fmt.Errorf("experts[%d]: invalid name %q (must match [a-zA-Z0-9][a-zA-Z0-9_-]*)", i, r.Name)
+		}
 		if seen[r.Name] {
 			return nil, fmt.Errorf("experts[%d]: duplicate expert name %q", i, r.Name)
 		}
@@ -195,8 +236,8 @@ func buildRole(y *yamlRole, baseDir string, readFile readFileFn, label string) (
 	if y.Model == "" {
 		return nil, fmt.Errorf("%s: missing required field: model", label)
 	}
-	if y.PromptFile == "" {
-		return nil, fmt.Errorf("%s: missing required field: prompt_file", label)
+	if y.PromptFile == "" && y.PromptBody == "" {
+		return nil, fmt.Errorf("%s: missing required field: prompt_file (or inline prompt_body)", label)
 	}
 	if y.Timeout == "" {
 		return nil, fmt.Errorf("%s: missing required field: timeout", label)
@@ -209,13 +250,24 @@ func buildRole(y *yamlRole, baseDir string, readFile readFileFn, label string) (
 		return nil, fmt.Errorf("%s: timeout must be > 0, got %s", label, d)
 	}
 	promptPath := y.PromptFile
-	if !filepath.IsAbs(promptPath) {
+	if promptPath != "" && !filepath.IsAbs(promptPath) {
 		promptPath = filepath.Join(baseDir, promptPath)
 	}
-	promptPath = filepath.Clean(promptPath)
-	body, err := readFile(promptPath)
-	if err != nil {
-		return nil, fmt.Errorf("%s: read prompt_file %s: %w", label, promptPath, err)
+	if promptPath != "" {
+		promptPath = filepath.Clean(promptPath)
+	}
+	// prompt_body wins over prompt_file when both are set: that's what makes
+	// profile.snapshot.yaml a true frozen snapshot — the inlined body keeps
+	// the recorded prompt_file purely informational.
+	var body []byte
+	if y.PromptBody != "" {
+		body = []byte(y.PromptBody)
+	} else {
+		var rerr error
+		body, rerr = readFile(promptPath)
+		if rerr != nil {
+			return nil, fmt.Errorf("%s: read prompt_file %s: %w", label, promptPath, rerr)
+		}
 	}
 	// Reject YAML frontmatter at the top of a prompt body. v1 prompt files are
 	// plain markdown; design/v1.md §16 F7 promises that a `---\nkey: value\n---`
@@ -223,7 +275,7 @@ func buildRole(y *yamlRole, baseDir string, readFile readFileFn, label string) (
 	// executor (where it would be interpreted as part of the role body and
 	// confuse the LLM). v2 may introduce frontmatter under `version: 2`.
 	if hasYAMLFrontmatter(body) {
-		return nil, fmt.Errorf("%s: prompt_file %s starts with YAML frontmatter, which is reserved for v2", label, promptPath)
+		return nil, fmt.Errorf("%s: prompt body %s starts with YAML frontmatter, which is reserved for v2", label, promptPath)
 	}
 	return &RoleConfig{
 		Name:       y.Name,

@@ -219,6 +219,7 @@ func runExpert(ctx context.Context, profile *config.Profile, ex config.RoleConfi
 		Timeout:    ex.Timeout,
 		StdoutFile: filepath.Join(dir, "output.md"),
 		StderrFile: filepath.Join(dir, "stderr.log"),
+		MaxRetries: profile.MaxRetries,
 	}
 	resp, err, retries := runWithFailRetry(ctx, ex.Executor, profile.MaxRetries, req)
 
@@ -287,6 +288,7 @@ func runJudge(ctx context.Context, profile *config.Profile, question string, exp
 		Timeout:    profile.Judge.Timeout,
 		StdoutFile: filepath.Join(dir, "synthesis.md"),
 		StderrFile: filepath.Join(dir, "stderr.log"),
+		MaxRetries: profile.MaxRetries,
 	}
 	const judgeMaxRetries = 1
 	resp, err, retries := runWithFailRetry(ctx, profile.Judge.Executor, judgeMaxRetries, req)

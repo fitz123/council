@@ -14,9 +14,9 @@
 //   - Rate-limit retries are RUNNER-OWNED. They are an infrastructure
 //     concern: every CLI we wrap inherits the same back-off behavior, and
 //     a 429 should not consume the caller's policy budget. Bound: up to
-//     req.MaxRetries+1 rate-limit retries (so even MaxRetries=0 still
-//     gets one rate-limit retry, matching the design's "max_retries+1
-//     attempts" wording).
+//     req.RateLimitMaxRetries rate-limit retries (the design's
+//     "max_retries+1" wording is materialised at the call site by passing
+//     profile.MaxRetries+1 here — see pkg/executor/claudecode).
 //   - Fail-retries (timeout, non-zero exit without a rate-limit marker)
 //     are ORCHESTRATOR-OWNED. They are a policy concern driven by the
 //     profile's max_retries field. Callers that want to keep all
@@ -25,7 +25,9 @@
 //     Run once per fail-retry it wants to grant.
 //
 // pkg/executor/claudecode follows the second convention: it passes
-// MaxRetries: 0 so pkg/orchestrator stays in charge of fail-retry policy.
+// MaxRetries: 0 so pkg/orchestrator stays in charge of fail-retry policy,
+// and sets RateLimitMaxRetries: profile.MaxRetries+1 so the rate-limit
+// budget tracks the profile.
 package runner
 
 import (
@@ -47,16 +49,19 @@ import (
 // things like CLAUDE_CODE_MAX_OUTPUT_TOKENS without reaching into runner
 // internals. nil Env means inherit the parent process environment.
 //
-// MaxRetries is the per-call retry budget; see the package doc for the
+// MaxRetries is the per-call fail-retry budget (timeout, non-zero exit
+// without a rate-limit marker). RateLimitMaxRetries is the per-call
+// rate-limit retry budget (429s); see the package doc for the
 // runner-owned vs orchestrator-owned split.
 type RunRequest struct {
-	Argv       []string
-	Prompt     string
-	Env        []string
-	StdoutFile string
-	StderrFile string
-	Timeout    time.Duration
-	MaxRetries int
+	Argv                []string
+	Prompt              string
+	Env                 []string
+	StdoutFile          string
+	StderrFile          string
+	Timeout             time.Duration
+	MaxRetries          int
+	RateLimitMaxRetries int
 }
 
 // RunResponse summarizes the final attempt. Retries counts every retry
@@ -106,7 +111,7 @@ func Run(ctx context.Context, req RunRequest) (RunResponse, error) {
 		}
 		if errors.Is(err, ErrRateLimit) {
 			resp.RateLimited = true
-			if rlRetries >= req.MaxRetries+1 {
+			if rlRetries >= req.RateLimitMaxRetries {
 				return resp, err
 			}
 			rlRetries++
@@ -159,6 +164,11 @@ func runOnce(parent context.Context, req RunRequest) (exitCode int, retryAfter t
 
 	stderr, openErr := os.Create(req.StderrFile)
 	if openErr != nil {
+		// Remove the empty stdout file so a failed stderr-open doesn't
+		// leave an orphan zero-byte output.md behind (which would confuse
+		// offline readers looking for a session's artifacts).
+		_ = stdout.Close()
+		_ = os.Remove(req.StdoutFile)
 		return 0, 0, 0, fmt.Errorf("runner: open stderr %s: %w", req.StderrFile, openErr)
 	}
 	defer stderr.Close()

@@ -180,20 +180,22 @@ func TestRunCtxCancelSkipsFailRetry(t *testing.T) {
 	}
 }
 
-func TestRunRateLimitRetriesEvenWithMaxRetriesZero(t *testing.T) {
-	// Per design §10: rate-limit retries are runner-owned; even with
-	// MaxRetries=0, a 429 gets one retry (max_retries+1 total
-	// rate-limit attempts, where max_retries=0 → 1 retry).
+func TestRunRateLimitRetriesUsesRateLimitBudget(t *testing.T) {
+	// Per design §10: rate-limit retries are runner-owned with budget
+	// req.RateLimitMaxRetries (callers materialise the design's
+	// "max_retries+1" by passing profile.MaxRetries+1 — see
+	// pkg/executor/claudecode). Here we set it to 1 directly.
 	out, errf := paths(t)
 	start := time.Now()
 	resp, err := Run(context.Background(), RunRequest{
 		Argv: []string{"sh", "-c", `printf "rate_limit exceeded\nRetry-After: 1s\n" >&2; exit 1`},
 		// override default 10s sleep with a 1s Retry-After hint so the
 		// test runs quickly
-		StdoutFile: out,
-		StderrFile: errf,
-		Timeout:    5 * time.Second,
-		MaxRetries: 0,
+		StdoutFile:          out,
+		StderrFile:          errf,
+		Timeout:             5 * time.Second,
+		MaxRetries:          0,
+		RateLimitMaxRetries: 1,
 	})
 	elapsed := time.Since(start)
 	if !errors.Is(err, ErrRateLimit) {
@@ -203,13 +205,36 @@ func TestRunRateLimitRetriesEvenWithMaxRetriesZero(t *testing.T) {
 		t.Errorf("RateLimited = false, want true")
 	}
 	if resp.Retries != 1 {
-		t.Errorf("Retries = %d, want 1 (MaxRetries=0 → 1 rate-limit retry)", resp.Retries)
+		t.Errorf("Retries = %d, want 1 (RateLimitMaxRetries=1)", resp.Retries)
 	}
 	if elapsed < 800*time.Millisecond {
 		t.Errorf("elapsed = %s — Retry-After hint was probably not honored", elapsed)
 	}
 	if elapsed > 4*time.Second {
 		t.Errorf("elapsed = %s — Retry-After hint was probably ignored (used 10s default)", elapsed)
+	}
+}
+
+// TestRunRateLimitNoRetryWithZeroBudget locks in that a zero
+// RateLimitMaxRetries means "no rate-limit retries" — the runner returns
+// ErrRateLimit on the first 429 instead of silently allowing one freebie.
+// This is the behavior change from the prior (req.MaxRetries+1) bound,
+// which always granted one retry regardless of caller intent.
+func TestRunRateLimitNoRetryWithZeroBudget(t *testing.T) {
+	out, errf := paths(t)
+	resp, err := Run(context.Background(), RunRequest{
+		Argv:                []string{"sh", "-c", `printf "rate_limit exceeded\n" >&2; exit 1`},
+		StdoutFile:          out,
+		StderrFile:          errf,
+		Timeout:             5 * time.Second,
+		MaxRetries:          0,
+		RateLimitMaxRetries: 0,
+	})
+	if !errors.Is(err, ErrRateLimit) {
+		t.Fatalf("err = %v, want ErrRateLimit", err)
+	}
+	if resp.Retries != 0 {
+		t.Errorf("Retries = %d, want 0 (zero rate-limit budget)", resp.Retries)
 	}
 }
 

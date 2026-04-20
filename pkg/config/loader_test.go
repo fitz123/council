@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -457,6 +458,28 @@ func TestLoad_PrecedenceGlobalWhenNoLocal(t *testing.T) {
 	}
 	if !strings.Contains(src, global) {
 		t.Errorf("source %q does not reference global home %q", src, global)
+	}
+}
+
+// TestLoad_UserHomeDirErrorIsSurfaced covers the case where userHomeDir
+// returns an unexpected error (e.g. $HOME unset under sudo). A silent
+// fall-through to embedded would hide the operator's real problem — their
+// ~/.config/council/default.yaml is being bypassed without explanation.
+// The loader must return the error instead.
+func TestLoad_UserHomeDirErrorIsSurfaced(t *testing.T) {
+	local := t.TempDir() // no .council here
+
+	oldHome := userHomeDir
+	sentinel := errors.New("home lookup failed")
+	userHomeDir = func() (string, error) { return "", sentinel }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	_, _, err := Load(local)
+	if err == nil {
+		t.Fatalf("Load: expected error when userHomeDir fails, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Load error = %v, want to wrap %v", err, sentinel)
 	}
 }
 
