@@ -337,6 +337,58 @@ max_retries: 0
 	}
 }
 
+// TestLoadFile_RejectsYAMLFrontmatter covers F7b — an expert prompt body that
+// begins with `---\nfoo: bar\n---` is rejected at load time because v1
+// reserves frontmatter syntax for v2. The error must mention the offending
+// prompt file so operators can locate it without grepping.
+func TestLoadFile_RejectsYAMLFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeProfile(t, dir, validYAML)
+	// Overwrite one expert's prompt with frontmatter-bearing content. The
+	// helper has already laid down a vanilla independent.md; swap it.
+	bad := filepath.Join(dir, ".council", "prompts", "independent.md")
+	if err := os.WriteFile(bad, []byte("---\nfoo: bar\n---\nrest of body\n"), 0o644); err != nil {
+		t.Fatalf("write bad prompt: %v", err)
+	}
+	_, err := LoadFile(cfgPath)
+	if err == nil {
+		t.Fatalf("LoadFile: expected frontmatter rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "frontmatter") {
+		t.Fatalf("error %q should mention frontmatter", err)
+	}
+	if !strings.Contains(err.Error(), "independent.md") {
+		t.Fatalf("error %q should name the offending prompt file", err)
+	}
+}
+
+// TestHasYAMLFrontmatter exercises the detector on edge cases the loader
+// relies on: bare body, leading whitespace, mid-body `---` rule (must NOT
+// trigger), CRLF line endings, missing closing fence.
+func TestHasYAMLFrontmatter(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"plain body", "you are an expert.\n", false},
+		{"valid frontmatter", "---\nfoo: bar\n---\nbody\n", true},
+		{"frontmatter with leading blank", "\n\n---\nx: 1\n---\n", true},
+		{"crlf frontmatter", "---\r\nx: 1\r\n---\r\n", true},
+		{"mid-body horizontal rule", "intro\n\n---\nnot frontmatter\n", false},
+		{"no closing fence", "---\nopen but never closed\n", false},
+		{"three dashes no newline", "---", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasYAMLFrontmatter([]byte(tc.in))
+			if got != tc.want {
+				t.Fatalf("hasYAMLFrontmatter(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoad_PrecedenceLocalOverGlobal(t *testing.T) {
 	local := t.TempDir()
 	global := t.TempDir()

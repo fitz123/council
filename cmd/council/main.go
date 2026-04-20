@@ -22,8 +22,10 @@ import (
 	"syscall"
 	"time"
 
-	// Side-effect import — registers the "claude-code" executor.
-	_ "github.com/fitz123/council/pkg/executor/claudecode"
+	// Executor registration is split across executors_release.go (default
+	// build) and executors_testbinary.go (gated by `-tags testbinary`),
+	// so the smoke test binary can substitute in mock executors without
+	// touching the production binary's wiring.
 
 	"github.com/fitz123/council/pkg/config"
 	"github.com/fitz123/council/pkg/orchestrator"

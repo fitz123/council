@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -164,6 +165,35 @@ func buildProfile(y *yamlProfile, baseDir string, readFile readFileFn, resolveBa
 	}, nil
 }
 
+// hasYAMLFrontmatter reports whether body begins with a `---` line followed
+// by a closing `---` line. Both terminators must end with a newline (so a
+// raw `---` rule mid-body cannot trigger a false positive on the opening
+// marker). Anything before the first non-whitespace character is ignored.
+func hasYAMLFrontmatter(body []byte) bool {
+	s := strings.TrimLeft(string(body), " \t\r\n")
+	if !strings.HasPrefix(s, "---\n") && !strings.HasPrefix(s, "---\r\n") {
+		return false
+	}
+	// Locate a closing `---` line after the opening one.
+	rest := s[strings.IndexByte(s, '\n')+1:]
+	for {
+		nl := strings.IndexByte(rest, '\n')
+		var line string
+		if nl < 0 {
+			line = rest
+		} else {
+			line = rest[:nl]
+		}
+		if strings.TrimRight(line, "\r") == "---" {
+			return true
+		}
+		if nl < 0 {
+			return false
+		}
+		rest = rest[nl+1:]
+	}
+}
+
 func buildRole(y *yamlRole, baseDir string, readFile readFileFn, label string) (*RoleConfig, error) {
 	if y.Executor == "" {
 		return nil, fmt.Errorf("%s: missing required field: executor", label)
@@ -192,6 +222,14 @@ func buildRole(y *yamlRole, baseDir string, readFile readFileFn, label string) (
 	body, err := readFile(promptPath)
 	if err != nil {
 		return nil, fmt.Errorf("%s: read prompt_file %s: %w", label, promptPath, err)
+	}
+	// Reject YAML frontmatter at the top of a prompt body. v1 prompt files are
+	// plain markdown; design/v1.md §16 F7 promises that a `---\nkey: value\n---`
+	// header fails validation rather than being silently passed through to the
+	// executor (where it would be interpreted as part of the role body and
+	// confuse the LLM). v2 may introduce frontmatter under `version: 2`.
+	if hasYAMLFrontmatter(body) {
+		return nil, fmt.Errorf("%s: prompt_file %s starts with YAML frontmatter, which is reserved for v2", label, promptPath)
 	}
 	return &RoleConfig{
 		Name:       y.Name,
