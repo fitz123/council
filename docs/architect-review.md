@@ -124,7 +124,7 @@ Each ADR records alternatives considered and the consequence trade-offs.
 Automatable checks for CI or a smoke suite.
 
 1. **Round-trip under 60s (Performance).** `council "what is 2+2?"` exits 0 in under 60s.
-2. **`verdict.json` schema validity (Testability).** `jq -e '.version, .session_id, .answer, .status, .duration_seconds'` passes after every test run.
+2. **`verdict.json` schema validity (Testability).** `jq -e '.version, .session_id, .answer, .rounds[0].experts, .rounds[0].judge'` passes after every test run. Aligned with spec `§16` F2.
 3. **Session-folder isolation (Parallel safety).** Three concurrent `council` invocations from one cwd produce three distinct session folders with non-colliding IDs.
 4. **Retry increments counter (Reliability contract).** With a stub executor that fails once then succeeds, `verdict.json.rounds[0].experts[*].retries` reflects the retry.
 5. **SIGINT produces partial verdict + exit 130 (Robustness).** Sending SIGINT mid-run kills the subprocess tree (no orphan `claude -p`) and writes `verdict.json` with `status: "interrupted"`.
@@ -145,7 +145,7 @@ Priority: **P1** = blocker for shipping · **P2** = resolve before implementatio
 | P2 | Atomic write of `verdict.json` unspecified | Crash during write → readers see partial JSON | `tmp + fsync + rename`; specified in ADR-0003 |
 | P2 | Process-group kill semantics on timeout | `SIGKILL` on parent does not reach the upstream CLI child | Spawn with `Setpgid=true`; kill via negative PID |
 | P2 | `verdict.json` without `version` field | v2 schema changes break consumers silently | `"version": 1` at root; specified in ADR-0003 |
-| P2 | Subprocess primitive duplicated between expert and judge | Drift between two copies | One shared `pkg/subprocess`; expert/judge are thin role wrappers |
+| P2 | Subprocess primitive duplicated between expert and judge | Drift between two copies | One shared `pkg/runner`; expert/judge are thin role wrappers |
 | P3 | Session-folder disk growth without rotation | Long-term use | README "maintenance" note; `council gc --older-than 30d` in v2 |
 | P3 | Default expert prompt too terse for complex questions | UX tuning | Observable; not architectural |
 
