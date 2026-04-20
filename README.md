@@ -80,17 +80,18 @@ council -p code-review "review this PR description: ..."
 ```
 $ council -v "what is 2+2?"
 [17:02:14] council v0.1.0 — session 2026-04-19T17-02-14Z-fizzy-jingling-quokka
-[17:02:14] profile: default (2 experts, quorum 1)
+[17:02:14] profile: default (2 experts, quorum 1) from embedded
 [17:02:14] spawning expert: independent (claude-code, sonnet)
 [17:02:14] spawning expert: critic (claude-code, sonnet)
-[17:02:31] expert independent: done in 17.3s
-[17:02:33] expert critic: done in 19.1s
-[17:02:33] quorum met (2/2)
-[17:02:33] spawning judge (claude-code, opus)
-[17:02:47] judge: done in 14.1s
-[17:02:47] session complete: 33.4s total
+[17:02:14] spawning judge (claude-code, opus)
+[17:02:47] expert independent: ok in 17.3s (retries=0)
+[17:02:47] expert critic: ok in 19.1s (retries=0)
+[17:02:47] judge: done in 14.1s (retries=0)
+[17:02:47] session ok: 33.4s total
 [17:02:47] session folder: ./.council/sessions/2026-04-19T17-02-14Z-fizzy-jingling-quokka
 ```
+
+The `profile: … from <source>` line names which config file the profile loaded from (cwd-local path, user-global path, or `embedded`). Per-role completion lines carry the verdict status (`ok` / `failed` / `interrupted`) and retry count so the stderr stream and `verdict.json` agree on what happened.
 
 Transcripts always land in the session folder, regardless of `-v`.
 
