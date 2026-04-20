@@ -102,6 +102,41 @@ func TestExecuteHappyPath(t *testing.T) {
 	}
 }
 
+func TestExecuteOverridesInheritedTokenBudget(t *testing.T) {
+	// If the caller exported CLAUDE_CODE_MAX_OUTPUT_TOKENS before running
+	// council, the child must still see 64000 (README §Environment).
+	// Without the dedup, both entries reach execve and glibc's getenv
+	// returns the first match — i.e. the caller's value would win.
+	t.Setenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "12345")
+
+	stub := writeStub(t)
+	c := &ClaudeCode{Binary: stub}
+
+	tmp := t.TempDir()
+	out := filepath.Join(tmp, "out")
+	errf := filepath.Join(tmp, "err")
+
+	_, err := c.Execute(context.Background(), executor.Request{
+		Prompt:     "x",
+		Model:      "sonnet",
+		Timeout:    5 * time.Second,
+		StdoutFile: out,
+		StderrFile: errf,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	got, _ := os.ReadFile(out)
+	gotStr := string(got)
+	if !strings.Contains(gotStr, "TOKENS: 64000") {
+		t.Errorf("token budget not overridden: stdout = %q", gotStr)
+	}
+	if strings.Contains(gotStr, "TOKENS: 12345") {
+		t.Errorf("inherited token budget leaked to child: stdout = %q", gotStr)
+	}
+}
+
 func TestExecuteModelMappingIsIdentity(t *testing.T) {
 	// v1 contract: MapModel is identity. Test the three documented
 	// names plus a hypothetical future one to lock the behavior in.

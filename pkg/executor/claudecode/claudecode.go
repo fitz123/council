@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/fitz123/council/pkg/executor"
@@ -97,8 +98,19 @@ func (c *ClaudeCode) Execute(ctx context.Context, req executor.Request) (executo
 	// Inherit the parent environment so PATH, HOME, ANTHROPIC_API_KEY,
 	// etc. propagate, then append our token-budget knob. nil Env in
 	// pkg/runner means "inherit"; passing an explicit slice replaces, so
-	// we must materialize os.Environ ourselves.
-	env := append(os.Environ(), envMaxOutputTokens)
+	// we must materialize os.Environ ourselves. Filter out any inherited
+	// CLAUDE_CODE_MAX_OUTPUT_TOKENS so ours wins — glibc's getenv returns
+	// the first match on duplicates, so a plain append would let the
+	// caller's value override us (contradicting README §Environment).
+	parent := os.Environ()
+	env := make([]string, 0, len(parent)+1)
+	for _, kv := range parent {
+		if strings.HasPrefix(kv, "CLAUDE_CODE_MAX_OUTPUT_TOKENS=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, envMaxOutputTokens)
 
 	resp, err := runner.Run(ctx, runner.RunRequest{
 		Argv:       argv,
