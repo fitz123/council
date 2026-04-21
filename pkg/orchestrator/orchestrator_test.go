@@ -133,6 +133,9 @@ func TestRun_HappyPath(t *testing.T) {
 	if v.Status != "ok" {
 		t.Errorf("status = %q, want ok", v.Status)
 	}
+	if want := "./.council/sessions/" + s.ID; v.SessionPath != want {
+		t.Errorf("session_path = %q, want %q", v.SessionPath, want)
+	}
 	if v.Answer != "FINAL_ANSWER" {
 		t.Errorf("answer = %q, want FINAL_ANSWER", v.Answer)
 	}
@@ -607,5 +610,31 @@ func TestRunWithFailRetry_CancelShortCircuits(t *testing.T) {
 	}
 	if n := atomic.LoadInt64(&calls); n > 1 {
 		t.Errorf("calls = %d, want <= 1 (must short-circuit on cancel)", n)
+	}
+}
+
+func TestRunWithFailRetry_CancelBetweenAttemptsDoesNotCountUnstartedRetry(t *testing.T) {
+	var calls int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stub := &stubExec{
+		name: "stub",
+		on: func(_ context.Context, _ int64, _ executor.Request) (executor.Response, error) {
+			atomic.AddInt64(&calls, 1)
+			cancel()
+			return executor.Response{ExitCode: 1}, errors.New("fail")
+		},
+	}
+	register(t, stub)
+
+	_, err, retries := runWithFailRetry(ctx, "stub", 100, executor.Request{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if retries != 0 {
+		t.Errorf("retries = %d, want 0 (second attempt never started)", retries)
+	}
+	if n := atomic.LoadInt64(&calls); n != 1 {
+		t.Errorf("calls = %d, want 1", n)
 	}
 }

@@ -109,11 +109,19 @@ type runOpts struct {
 // — this protects the suite from a hung child blocking the whole run.
 func runCouncil(t *testing.T, opts runOpts) runResult {
 	t.Helper()
-	if opts.binary == "" {
-		t.Fatalf("runCouncil: binary required")
-	}
 	if opts.cwd == "" {
 		opts.cwd = t.TempDir()
+	}
+	res, err := runCouncilResult(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func runCouncilResult(opts runOpts) (runResult, error) {
+	if opts.binary == "" {
+		return runResult{}, errors.New("runCouncil: binary required")
 	}
 	if opts.deadline == 0 {
 		opts.deadline = 60 * time.Second
@@ -146,12 +154,12 @@ func runCouncil(t *testing.T, opts runOpts) runResult {
 		if errors.As(err, &ee) {
 			res.exitCode = ee.ExitCode()
 		} else if ctx.Err() != nil {
-			t.Fatalf("council deadline %s exceeded; stderr:\n%s", opts.deadline, errBuf.String())
+			return res, fmt.Errorf("council deadline %s exceeded; stderr:\n%s", opts.deadline, errBuf.String())
 		} else {
-			t.Fatalf("council exec failed: %v\nstderr:\n%s", err, errBuf.String())
+			return res, fmt.Errorf("council exec failed: %v\nstderr:\n%s", err, errBuf.String())
 		}
 	}
-	return res
+	return res, nil
 }
 
 // envSlice converts a map to KEY=VAL form, suitable for appending to
@@ -335,13 +343,18 @@ func TestF3_ConcurrentDistinctSessions(t *testing.T) {
 					errs[i] = fmt.Errorf("panic: %v", r)
 				}
 			}()
-			results[i] = runCouncil(t, runOpts{
+			res, err := runCouncilResult(runOpts{
 				binary:   bin,
 				args:     []string{"hello"},
 				env:      map[string]string{envMock: "trivial"},
 				cwd:      cwds[i],
 				deadline: 30 * time.Second,
 			})
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			results[i] = res
 		}(i)
 	}
 	wg.Wait()

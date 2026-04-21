@@ -95,7 +95,7 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 	v := &session.VerdictV1{
 		Version:     1,
 		SessionID:   sess.ID,
-		SessionPath: sess.Path,
+		SessionPath: verdictSessionPath(sess.ID),
 		Profile:     profile.Name,
 		Question:    question,
 		StartedAt:   startedAt.Format(timestampLayout),
@@ -206,6 +206,10 @@ func finalize(v *session.VerdictV1, startedAt time.Time) {
 	end := time.Now().UTC()
 	v.EndedAt = end.Format(timestampLayout)
 	v.DurationSeconds = end.Sub(startedAt).Seconds()
+}
+
+func verdictSessionPath(id string) string {
+	return "./" + filepath.ToSlash(filepath.Join(".council", "sessions", id))
 }
 
 // runExpert handles one expert's full lifecycle: mkdir its stage dir,
@@ -356,7 +360,10 @@ func runWithFailRetry(ctx context.Context, execName string, maxRetries int, req 
 	var lastResp executor.Response
 	for attempt := 0; ; attempt++ {
 		if cerr := ctx.Err(); cerr != nil {
-			return lastResp, cerr, attempt
+			if attempt == 0 {
+				return lastResp, cerr, 0
+			}
+			return lastResp, cerr, attempt - 1
 		}
 		resp, err := exec.Execute(ctx, req)
 		lastResp = resp
