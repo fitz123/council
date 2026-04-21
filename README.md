@@ -15,7 +15,7 @@ Inspired by:
 
 ## Install
 
-Requires Go 1.24+ and a working `claude` CLI on `$PATH` (Claude Code subscription).
+Requires Go 1.25+ (as declared in `go.mod`) and a working `claude` CLI on `$PATH` (Claude Code subscription).
 
 ```
 go install github.com/fitz123/council/cmd/council@latest

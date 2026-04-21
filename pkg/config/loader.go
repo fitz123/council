@@ -299,7 +299,11 @@ func buildRole(y *yamlRole, baseDir string, readFile readFileFn, label string) (
 	// executor (where it would be interpreted as part of the role body and
 	// confuse the LLM). v2 may introduce frontmatter under `version: 2`.
 	if hasYAMLFrontmatter(body) {
-		return nil, fmt.Errorf("%s: prompt body %s starts with YAML frontmatter, which is reserved for v2", label, promptPath)
+		source := promptPath
+		if source == "" {
+			source = "<inline prompt_body>"
+		}
+		return nil, fmt.Errorf("%s: prompt body %s starts with YAML frontmatter, which is reserved for v2", label, source)
 	}
 	return &RoleConfig{
 		Name:       y.Name,

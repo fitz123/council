@@ -111,6 +111,51 @@ func TestRunTimeoutKillsAndReturnsErrTimeout(t *testing.T) {
 	if resp.Retries != 0 {
 		t.Errorf("Retries = %d, want 0 (MaxRetries default = 0)", resp.Retries)
 	}
+	if resp.ExitCode != KilledExitCode {
+		t.Errorf("ExitCode = %d, want KilledExitCode (%d) for a timed-out subprocess", resp.ExitCode, KilledExitCode)
+	}
+}
+
+func TestRunValidatesRequiredFields(t *testing.T) {
+	out, errf := paths(t)
+	validArgv := []string{"sh", "-c", "exit 0"}
+	cases := []struct {
+		name      string
+		req       RunRequest
+		wantMatch string
+	}{
+		{
+			name:      "empty StdoutFile",
+			req:       RunRequest{Argv: validArgv, StderrFile: errf, Timeout: time.Second},
+			wantMatch: "StdoutFile is required",
+		},
+		{
+			name:      "empty StderrFile",
+			req:       RunRequest{Argv: validArgv, StdoutFile: out, Timeout: time.Second},
+			wantMatch: "StderrFile is required",
+		},
+		{
+			name:      "zero Timeout",
+			req:       RunRequest{Argv: validArgv, StdoutFile: out, StderrFile: errf, Timeout: 0},
+			wantMatch: "Timeout must be > 0",
+		},
+		{
+			name:      "negative Timeout",
+			req:       RunRequest{Argv: validArgv, StdoutFile: out, StderrFile: errf, Timeout: -1 * time.Second},
+			wantMatch: "Timeout must be > 0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Run(context.Background(), tc.req)
+			if err == nil {
+				t.Fatalf("Run with %s: expected validation error, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantMatch) {
+				t.Errorf("Run error = %q, want substring %q", err.Error(), tc.wantMatch)
+			}
+		})
+	}
 }
 
 func TestRunNonZeroExitWithoutRateLimit(t *testing.T) {

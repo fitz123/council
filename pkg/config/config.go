@@ -3,9 +3,11 @@ package config
 import "time"
 
 // Profile is the resolved, validated council profile loaded from a YAML file
-// or the embedded defaults. All RoleConfig.PromptFile values are absolute
-// paths, and RoleConfig.PromptBody is populated with the file contents as
-// read at Load time.
+// or the embedded defaults. RoleConfig.PromptBody is populated with the
+// prompt contents at Load time. RoleConfig.PromptFile may be an absolute
+// path for filesystem-loaded profiles, a relative path for embedded
+// profiles (resolved against the embedded FS), or empty when the prompt is
+// provided inline via the YAML `prompt_body` field.
 type Profile struct {
 	Version    int
 	Name       string

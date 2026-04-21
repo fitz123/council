@@ -69,12 +69,24 @@ type RunRequest struct {
 // record a single number into verdict.json regardless of which kind of
 // retry happened. RateLimited is sticky: it is true if any attempt
 // observed a 429 marker, even if the final attempt did not.
+//
+// ExitCode carries the final attempt's exit code, with one sentinel:
+// KilledExitCode (-1) means the subprocess was killed before it could
+// exit (timeout or parent-ctx cancellation). Callers that persist
+// verdict.json can surface -1 directly so readers can distinguish
+// "exited cleanly with code 0" from "never got to exit".
 type RunResponse struct {
 	ExitCode    int
 	Duration    time.Duration
 	Retries     int
 	RateLimited bool
 }
+
+// KilledExitCode is the ExitCode sentinel returned when a subprocess was
+// killed by the runner (timeout) or via parent-ctx cancellation, i.e. it
+// never reached a clean exit. Using -1 keeps it distinct from any real
+// process exit code (0–255 on POSIX).
+const KilledExitCode = -1
 
 // Sentinel errors. Callers should use errors.Is for matching, since the
 // error wrapping path includes context (which attempt failed, exit code,
@@ -155,6 +167,15 @@ func runOnce(parent context.Context, req RunRequest) (exitCode int, retryAfter t
 	if len(req.Argv) == 0 {
 		return 0, 0, 0, fmt.Errorf("runner: empty Argv")
 	}
+	if req.StdoutFile == "" {
+		return 0, 0, 0, fmt.Errorf("runner: StdoutFile is required")
+	}
+	if req.StderrFile == "" {
+		return 0, 0, 0, fmt.Errorf("runner: StderrFile is required")
+	}
+	if req.Timeout <= 0 {
+		return 0, 0, 0, fmt.Errorf("runner: Timeout must be > 0, got %s", req.Timeout)
+	}
 
 	stdout, openErr := os.Create(req.StdoutFile)
 	if openErr != nil {
@@ -219,7 +240,10 @@ func runOnce(parent context.Context, req RunRequest) (exitCode int, retryAfter t
 	_ = stderr.Sync()
 
 	if killed {
-		return 0, 0, dur, killReason
+		// KilledExitCode (-1) distinguishes "runner tore the subprocess
+		// down" from "subprocess exited cleanly with code 0" — readers
+		// of verdict.json need to see the difference.
+		return KilledExitCode, 0, dur, killReason
 	}
 
 	if waitErr == nil {
