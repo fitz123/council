@@ -182,7 +182,12 @@ func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Pro
 	}
 
 	experts := make([]RoleConfig, 0, len(y.Experts))
-	seen := map[string]bool{}
+	// Dedup is case-insensitive: expert names become filesystem paths under
+	// rounds/1/experts/<name>/, and macOS APFS (default case-insensitive) +
+	// Windows NTFS would alias e.g. "critic" and "Critic" to the same directory.
+	// Two goroutines racing mkdir + writes into one directory is silent
+	// corruption, so reject the collision at validation time.
+	seen := map[string]string{}
 	for i := range y.Experts {
 		r, err := buildRole(&y.Experts[i], resolveBase, readFile, fmt.Sprintf("experts[%d]", i))
 		if err != nil {
@@ -194,10 +199,14 @@ func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Pro
 		if !expertNameRE.MatchString(r.Name) {
 			return nil, fmt.Errorf("experts[%d]: invalid name %q (must match [a-zA-Z0-9][a-zA-Z0-9_-]*)", i, r.Name)
 		}
-		if seen[r.Name] {
-			return nil, fmt.Errorf("experts[%d]: duplicate expert name %q", i, r.Name)
+		key := strings.ToLower(r.Name)
+		if prior, ok := seen[key]; ok {
+			if prior == r.Name {
+				return nil, fmt.Errorf("experts[%d]: duplicate expert name %q", i, r.Name)
+			}
+			return nil, fmt.Errorf("experts[%d]: expert name %q collides with %q on case-insensitive filesystems (names map to filesystem paths)", i, r.Name, prior)
 		}
-		seen[r.Name] = true
+		seen[key] = r.Name
 		experts = append(experts, *r)
 	}
 

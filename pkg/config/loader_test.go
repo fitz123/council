@@ -234,6 +234,31 @@ max_retries: 0
 			wantSub: "duplicate",
 		},
 		{
+			name: "case-insensitive expert name collision",
+			yaml: `version: 1
+name: default
+judge:
+  executor: claude-code
+  model: opus
+  prompt_file: prompts/judge.md
+  timeout: 300s
+experts:
+  - name: critic
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/critic.md
+    timeout: 180s
+  - name: Critic
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+`,
+			wantSub: "case-insensitive",
+		},
+		{
 			name: "bad timeout",
 			yaml: `version: 1
 name: default
