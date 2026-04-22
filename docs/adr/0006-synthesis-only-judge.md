@@ -1,6 +1,10 @@
 # ADR-0006: Judge synthesizes only — no debate rounds at MVP
 
-**Status:** Proposed.
+**Status:** Superseded by [ADR-0008 (debate rounds with anonymization + nonce injection)](0008-debate-rounds-anonymization-injection.md).
+
+v1 shipped with single-pass synthesis. v2 introduces multi-round debate (K≥1, default K=2) with blind round 1 + peer-aware round 2, stable anonymization labels, and a per-session nonce on prompt fences. Rounds count comes from the `rounds` field in the single `defaults/default.yaml` profile; there is no `--rounds` CLI flag.
+
+v2 also removes the judge role entirely — the Round 5 simplification (see `docs/design/v2.md` D15) replaced judge-driven synthesis with expert-cast voting, where the winning expert's R2 text is returned verbatim. ADR-0006's "judge synthesizes only" decision is thus doubly reshaped: MVP had the judge; v2 replaces the judge with voting.
 
 ## Context
 

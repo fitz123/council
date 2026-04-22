@@ -106,16 +106,19 @@ The session folder **is** the data model:
 
 ## Part C — ADRs
 
-Six ADRs capture the key decisions (see `docs/adr/`):
+Nine ADRs capture the key decisions (see `docs/adr/`):
 
 - **0001** — Go orchestrator; no LLM in the decision loop.
 - **0002** — Subprocess IPC via stdin/stdout/exit codes (not argv — `ARG_MAX` limit).
 - **0003** — File-based session artifacts (folder-as-database) with atomic `verdict.json`.
-- **0004** — Flat single-file config for MVP; defer the `profiles/experts/judges/` split.
-- **0005** — Single model/CLI at MVP (Claude Code); default profile ships N ≥ 2 expert personas.
-- **0006** — Judge synthesizes only; no debate rounds at MVP.
+- **0004** — Flat single-file config for MVP; defer the `profiles/experts/judges/` split. *Retained in v2 (Round 5 simplification reverted the multi-profile split from Round 4).*
+- **0005** — Single model/CLI at MVP (Claude Code); default profile ships N ≥ 2 expert personas. *Extended by ADR-0008 in v2 (N=3 default; `len(experts) >= 2` required).*
+- **0006** — Judge synthesizes only; no debate rounds at MVP. *Superseded by ADR-0008 in v2 (debate rounds added; judge itself removed per design doc D15).*
+- **0007** — LLM classifier selects per-type profile (synthesis/vote/factual). *Added in v2 Round 4; **superseded** by v2 Round 5 simplification (single flow, no classifier). Retained for historical record.*
+- **0008** — Debate rounds with blind R1, stable anonymization, per-session nonce injection boundary. *Added in v2.*
+- **0009** — Pairwise tournament with self-defense as conditional tie-break on close votes (≤60%). *Added in v2 Round 4; **superseded** by v2 Round 5 simplification (tournament removed; vote uses simple plurality). Retained for historical record.*
 
-Each ADR records alternatives considered and the consequence trade-offs.
+Each ADR records alternatives considered and the consequence trade-offs. The v1 sections of this review (Parts A/B/D/E) describe the MVP scope; v2 additions (debate rounds + anonymization + voting + resume) layer on top of the same bounded contexts, with `pkg/debate/` as the only new package — see `docs/design/v2.md` and `docs/plans/2026-04-22-v2-debate-engine.md`.
 
 ---
 
@@ -162,3 +165,97 @@ The three remaining architectural tasks before implementation starts:
 3. **Verify upstream CLI flags against the current release** and fold the result back into the spec (P1).
 
 After these, the remaining work is tactical — how to implement — not strategic.
+
+---
+
+## Part G — v2 additions (debate engine)
+
+**Scope:** this section adds the systems-analysis lens for v2 changes introduced by `docs/design/v2.md` and `docs/plans/2026-04-22-v2-debate-engine.md`. v1 sections A–F remain authoritative for the MVP scope. v2 layers debate rounds + anonymization + voting + resume on top of the same bounded contexts; Part G captures what the addition changes.
+
+**Note:** Round 5 simplification (2026-04-21) reverted Round 4's classifier + three-flow architecture. What Part G described previously (classifier, tournament, factual-unanimity judge) has been removed from v2. ADRs 0007 and 0009 are superseded but retained for history.
+
+### G.1 — New bounded contexts
+
+One new package; total grows from 7 to 8 bounded contexts. Process-oriented (what the system *does*), not entity-oriented — no Entity-Service smell.
+
+1. **`pkg/debate`** — cohesive debate engine: round lifecycle (R1 fan-out + R2 peer-aware fan-out), `aggregate.md` assembly, anonymization (label assignment via seeded shuffle), voting (ballot fan-out + tally + winner-or-tied selection). One package; internal file split (`rounds.go`, `vote.go`, `anonymize.go`) as size demands.
+
+Existing v1 contexts keep their v1 shape; `pkg/orchestrator` gains the multi-round pipeline + vote stage, `pkg/config` gains `rounds` and `voting` fields, `pkg/session` gains the `rounds/N/…` + `voting/` layout, `pkg/prompt` gains three new assemblers (R1 expert, R2 peer-aware expert, ballot) + two injection helpers (`Wrap`, `CheckForgery`). `pkg/runner` and `pkg/executor/claudecode` are unchanged.
+
+### G.2 — `pkg/debate` cohesion check
+
+`pkg/debate` holds four concerns (rounds, aggregate, anonymization, voting) — well inside the cohesion threshold for a single Go package. All concerns share the same session-scoped state (session ID, anonymization map, session nonce, per-round outputs, seed formulas); splitting would require threading a `SessionState` struct across multiple packages for no cohesion win.
+
+**Guard rail:** if `pkg/debate` exceeds ~1000 LOC or its internal files stop sharing state cleanly, revisit the split with a dedicated `pkg/debate/state.go` + thin subpackages. File-level split inside the package is the first line of defense.
+
+### G.3 — Quality-attribute drift
+
+v1's explicit QAs (Performance <60s, Testability, Simplicity) do not survive v2 unchanged. The shift:
+
+| Attribute | v1 | v2 | Δ |
+|---|---|---|---|
+| **Performance** | < 60s simple question | ~3-5 minutes (blind R1 + peer-aware R2 + vote ballot fan-out) | **Regressed deliberately** — debate is 3–5× more expensive than single-pass (design §1.4). |
+| **Testability** | Exit-code + verdict schema | Same + anonymization invariant + vote outcome invariant | **Extended.** |
+| **Simplicity** | One binary, one build, one profile | Same — single `default.yaml`, no type dispatch | **Preserved** after Round 5 simplification. |
+| **Accuracy** | Implicit (single pass) | **New explicit QA** — debate's raison d'être (Du et al +7–15% on reasoning). |
+| **Determinism / reproducibility** | Folder-as-database | **New explicit QA** — same session re-plays produce identical prompts given identical expert outputs (fitness F8); anonymization is deterministic from session_id. |
+| **Fairness / no single-model bias** | Implicit (single judge) | **New explicit QA** — voting distributes decision across all N experts; no single judge dominates (design D15). |
+| **Resumability** | Absent | **New explicit QA** — `council resume` lets a session continue from the last completed stage after SIGINT / network blip / rate-limit wall (design D14). |
+
+**Not priorities in v2 either** (carry-forward from v1): scalability, availability, security (single-user + trusted-operator threat model).
+
+### G.4 — Coupling delta
+
+Added couplings (all acceptable):
+
+| Pair | Coupling types | Assessment |
+|---|---|---|
+| `pkg/debate` ↔ `pkg/prompt` | Semantic (label alphabet, nonce format, fence regex) | **Load-bearing contract.** Codified in ADR-0008. |
+| `pkg/debate` ↔ `pkg/session` | Static (folder paths `rounds/N/experts/<label>/`, `voting/`) | Pre-nested from v1 (ADR-0003 extension). Zero migration cost. |
+| `verdict.json` v2 consumers ↔ schema | Static + Semantic, versioned (`"version": 2`) | v1 → v2 is a schema extension (flat `experts[]` + `judge` → `rounds[].experts[]`, added `anonymization`, `voting`; removed `judge` per D15). Migration note in README. |
+
+Existing v1 couplings unchanged. Note that Round 4's `pkg/orchestrator ↔ pkg/classifier` coupling is removed along with the classifier.
+
+### G.5 — v2 risk register (delta)
+
+P1 / P2 / P3 scale continues from v1. Risks flagged by v2 design review:
+
+| P | Risk | Mitigation |
+|---|---|---|
+| P1 | Nonce-based injection is sufficient under trusted-operator threat model but **not under adversarial/multi-vendor** (v3 will add executors outside our control) | Upgrade path documented in ADR-0008 — per-section SHA-256 hashes when multi-vendor CLIs arrive |
+| P2 | Writing-style leak across rounds reveals expert identity despite stable-label anonymization; can bias voting | Accepted as known limitation R-v2-06; style-anonymization deferred to v3 |
+| P2 | Raw expert R2 text may be rougher than judge-polished prose | Accepted trade-off of D15 (no judge); if problematic in practice, v3 may add a narrow polish step with proven-narrow contract |
+| P2 | 1-1-1 three-way tie at N=3 surfaces all outputs (no tiebreak) | D16 YAGNI: operator chooses from three tied answers; add tiebreak logic only when operational data shows it's needed |
+| P2 | verdict.json v1 consumers break on v2 schema | Migration note + version bump `1 → 2`; downstream must pin version |
+| P3 | `pkg/debate` size creep past ~1000 LOC → cohesion degrades | G.2 guard rail; file-level split first, package split if unavoidable |
+
+P3 "N=1 under-exercises fan-out bugs" from v1 is **retired** — v2 defaults push N to 3 and validator requires `len(experts) >= 2`.
+
+Retired from Round 4 (no longer applicable after simplification): classifier miscalibration risk, tournament self-preference bias risk, classifier confidence-threshold risk — all specific to removed features.
+
+### G.6 — Fitness functions (v2)
+
+v1 had 7 fitness functions; v2 retains those plus adds three:
+
+- **F8** — anonymization stability: every label occurrence resolves to the same real name.
+- **F9** — injection forgery rejection: forged expert output with fake fence (no nonce) is rejected.
+- **F12** — vote outcome: `verdict.json.voting.winner` or `voting.tied_candidates` is populated (exactly one).
+
+F2 updated to check v2 schema (`rounds[]`, `voting`, `anonymization`). F4 path updated (`rounds[0].experts[].retries`).
+
+Retired: F10 (classifier output schema) and F11 (tournament trigger arithmetic) — both were specific to Round 4 removed features.
+
+F9 is retained as unit-test coverage in v2, not as a gating fitness function enforced by CI — the per-session nonce is small and unit-tested at the boundary.
+
+### G.7 — Verdict
+
+v2 preserves v1's clean architecture profile and adds one new bounded context (`pkg/debate`) without introducing Entity-Service or Technical-Steps anti-patterns. The remaining load-bearing strategic decision is ADR-0008 (debate rounds + anonymization + nonce). ADRs 0007 and 0009 exist as historical record of the Round 4 classifier/tournament decisions that Round 5 simplified away.
+
+Architectural tasks before v2 implementation starts:
+
+1. **Round 5 simplification signed off** (2026-04-22): Single flow, no classifier, no judge, no tournament, no factual path. Voting is the sole aggregation mechanism; three-way ties surface all outputs (YAGNI per D16). Design is accepted.
+2. **Validate `claude -p --model sonnet`** still works as v2's expert executor (preserved from v1; no new model validation needed for the simplified design).
+3. **Verdict.json v2 migration note** — README documents that v2 bumps `version` to 2 and adds `rounds[]`, `anonymization`, `voting` fields; removes `judge`. Downstream tools must pin version.
+4. **Size-monitor `pkg/debate`** during implementation; if it approaches the 1000-LOC threshold, activate the G.2 guard rail.
+
+v2 is a meaningful architectural addition but not a rewrite — the v1 pipeline + folder-as-database + `Executor` interface + single-CLI constraint all carry forward intact. Round 5 simplification further preserves v1's simplicity by reverting to a single profile and a single flow.

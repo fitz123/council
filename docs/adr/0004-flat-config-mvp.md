@@ -1,6 +1,8 @@
 # ADR-0004: Flat single-file config for MVP (defer directory split)
 
-**Status:** Proposed.
+**Status:** Accepted. Retained in v2 after Round 5 simplification reverted the [ADR-0007](0007-classifier-selects-per-type-profile.md) per-type split.
+
+v1 shipped with `defaults/default.yaml`. v2 Round 4 briefly replaced this with three type-specific profiles (`synthesis.yaml`, `vote.yaml`, `factual.yaml`) plus a separate `classifier.yaml` per ADR-0007, but the Round 5 simplification (2026-04-21) reverted to a single `defaults/default.yaml` — ADR-0007 is now superseded. The "extension path" toward a directory layout (`profiles/`, `experts/`, `judges/`) sketched here remains a possible future evolution if configuration complexity genuinely grows; v2's single-profile shape made the directory split unnecessary.
 
 ## Context
 
