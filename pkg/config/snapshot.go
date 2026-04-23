@@ -8,19 +8,28 @@ import (
 )
 
 // Snapshot serializes the resolved profile to dstPath as YAML. Prompt bodies
-// are inlined verbatim under prompt_body so the snapshot is self-contained:
-// reload depends on neither the original prompt files (which the user may
-// edit later) nor the embedded FS (whose relative paths only resolve from
-// inside the binary). PromptFile is written alongside, purely as a record
-// of where the body was originally loaded from.
-func Snapshot(p *Profile, dstPath string) error {
+// are inlined verbatim under prompt_body / ballot_prompt_body so the snapshot
+// is self-contained: reload depends on neither the original prompt files
+// (which the user may edit later) nor the embedded FS (whose relative paths
+// only resolve from inside the binary). PromptFile is written alongside,
+// purely as a record of where the body was originally loaded from.
+//
+// sessionNonce is the per-session 16-hex nonce from pkg/debate; it is
+// recorded under the top-level session_nonce key so resume (D14) can re-read
+// it without re-generating. Empty string means omit (non-session callers
+// like config snapshot tests do not carry a nonce).
+func Snapshot(p *Profile, sessionNonce, dstPath string) error {
 	y := yamlProfile{
-		Version:    p.Version,
-		Name:       p.Name,
-		Judge:      roleToYaml(&p.Judge),
-		Experts:    make([]yamlRole, len(p.Experts)),
-		Quorum:     p.Quorum,
-		MaxRetries: p.MaxRetries,
+		Version:          p.Version,
+		Name:             p.Name,
+		Experts:          make([]yamlRole, len(p.Experts)),
+		Quorum:           p.Quorum,
+		MaxRetries:       p.MaxRetries,
+		Rounds:           p.Rounds,
+		Round2PromptFile: p.Round2Prompt.File,
+		Round2PromptBody: p.Round2Prompt.Body,
+		Voting:           votingToYaml(&p.Voting),
+		SessionNonce:     sessionNonce,
 	}
 	for i := range p.Experts {
 		y.Experts[i] = roleToYaml(&p.Experts[i])
@@ -44,4 +53,15 @@ func roleToYaml(r *RoleConfig) yamlRole {
 		PromptBody: r.PromptBody,
 		Timeout:    r.Timeout.String(),
 	}
+}
+
+func votingToYaml(v *VotingConfig) yamlVoting {
+	out := yamlVoting{
+		BallotPromptFile: v.BallotPromptFile,
+		BallotPromptBody: v.BallotPromptBody,
+	}
+	if v.Timeout > 0 {
+		out.Timeout = v.Timeout.String()
+	}
+	return out
 }

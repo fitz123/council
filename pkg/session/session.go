@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/fitz123/council/pkg/config"
 )
@@ -11,22 +12,31 @@ import (
 // Session represents one council run's on-disk folder. It does not own any
 // running subprocesses — the orchestrator owns those and uses Session purely
 // as a path/IO helper.
+//
+// Nonce is the 16-hex value used to fence every LLM-sourced string before
+// it flows back into a downstream prompt (ADR-0008 D11). It is copied from
+// the Create call / LoadSnapshot read so callers do not need to thread it
+// through separately.
 type Session struct {
-	ID   string
-	Path string
+	ID    string
+	Path  string
+	Nonce string
 }
 
 // Create allocates the session folder under <cwd>/.council/sessions/<id>/ and
 // writes the initial fixed artifacts: question.md and profile.snapshot.yaml.
-// The rounds/1/{experts,judge}/ subtree is created so per-stage directories
-// can be made by Stage.
+// The rounds/1/experts/ subtree is created so per-stage directories can be
+// made by the orchestrator.
 //
-// Per-expert subdirectories under rounds/1/experts/<name>/ are NOT created
-// here — that is the orchestrator's responsibility once it knows which
-// experts the profile has. Doing it here would couple Session to Profile
-// shape; instead the orchestrator calls os.MkdirAll(s.ExpertDir(name), 0o755)
-// before each expert run.
-func Create(cwd, id string, profile *config.Profile, question string) (*Session, error) {
+// nonce is the 16-hex session nonce from pkg/debate.GenerateNonce. It is
+// recorded in profile.snapshot.yaml under the session_nonce key so
+// `council resume` (D14) can re-derive the original fencing nonce without
+// re-running the randomness.
+//
+// Per-expert subdirectories under rounds/<r>/experts/<label>/ are NOT
+// created here — that is the orchestrator's responsibility once it knows
+// which experts the profile has.
+func Create(cwd, id string, profile *config.Profile, nonce, question string) (*Session, error) {
 	root := filepath.Join(cwd, ".council", "sessions", id)
 	// Ensure the ancestors exist, then create the session root exclusively
 	// so a collision (NewID clash, or a stale folder from a prior run) is
@@ -39,31 +49,24 @@ func Create(cwd, id string, profile *config.Profile, question string) (*Session,
 		return nil, fmt.Errorf("mkdir %s: %w", root, err)
 	}
 	expertsRoot := filepath.Join(root, "rounds", "1", "experts")
-	judgeRoot := filepath.Join(root, "rounds", "1", "judge")
-	for _, d := range []string{expertsRoot, judgeRoot} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return nil, fmt.Errorf("mkdir %s: %w", d, err)
-		}
+	if err := os.MkdirAll(expertsRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", expertsRoot, err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "question.md"), []byte(question), 0o644); err != nil {
 		return nil, fmt.Errorf("write question.md: %w", err)
 	}
-	if err := config.Snapshot(profile, filepath.Join(root, "profile.snapshot.yaml")); err != nil {
+	if err := config.Snapshot(profile, nonce, filepath.Join(root, "profile.snapshot.yaml")); err != nil {
 		return nil, fmt.Errorf("write profile.snapshot.yaml: %w", err)
 	}
-	return &Session{ID: id, Path: root}, nil
+	return &Session{ID: id, Path: root, Nonce: nonce}, nil
 }
 
-// ExpertDir returns the absolute path of one expert's stage directory under
-// rounds/1/experts/<name>/. The directory is not created here.
-func (s *Session) ExpertDir(name string) string {
-	return filepath.Join(s.Path, "rounds", "1", "experts", name)
-}
-
-// JudgeDir returns the absolute path of the judge stage directory under
-// rounds/1/judge/.
-func (s *Session) JudgeDir() string {
-	return filepath.Join(s.Path, "rounds", "1", "judge")
+// RoundExpertDir returns the absolute path of one expert's round-N stage
+// directory under rounds/<round>/experts/<label>/. The directory is not
+// created here — callers run os.MkdirAll before subprocess work. label is
+// the anonymized single-letter token assigned by pkg/debate.AssignLabels.
+func (s *Session) RoundExpertDir(round int, label string) string {
+	return filepath.Join(s.Path, "rounds", strconv.Itoa(round), "experts", label)
 }
 
 // TouchDone writes an empty .done marker inside dir. Only the orchestrator

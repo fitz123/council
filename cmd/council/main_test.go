@@ -15,38 +15,49 @@ import (
 	"github.com/fitz123/council/pkg/session"
 )
 
-// stubExec is a copy-lite of the orchestrator's stubExec — we only need
-// a tiny version for the CLI-level happy/quorum/judge path tests. The
-// registered executor is named "claude-code" so the test profiles can
-// reuse the shipped default-profile YAML verbatim.
+// stubExec routes each Execute call by req.StdoutFile so tests can inject
+// round-specific behaviour. v2 stages write to predictable paths:
+//
+//	rounds/1/experts/<label>/output.md — R1
+//	rounds/2/experts/<label>/output.md — R2
+//	voting/votes/<label>.txt           — ballot
 type stubExec struct {
 	name     string
-	onExpert func(stdoutFile, stderrFile string) (int, error)
-	onJudge  func(stdoutFile, stderrFile string) (int, error)
+	onRound  func(round int, label, stdoutFile, stderrFile string) (int, error)
+	onBallot func(label, stdoutFile, stderrFile string) (int, error)
 	calls    int64
 }
 
 func (s *stubExec) Name() string { return s.name }
 func (s *stubExec) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	atomic.AddInt64(&s.calls, 1)
-	if strings.HasSuffix(req.StdoutFile, "synthesis.md") {
-		code, err := s.onJudge(req.StdoutFile, req.StderrFile)
+	p := filepath.ToSlash(req.StdoutFile)
+	switch {
+	case strings.Contains(p, "/voting/votes/"):
+		label := strings.TrimSuffix(filepath.Base(p), ".txt")
+		code, err := s.onBallot(label, req.StdoutFile, req.StderrFile)
+		return executor.Response{ExitCode: code, Duration: time.Millisecond}, err
+	case strings.Contains(p, "/rounds/1/experts/"):
+		label := filepath.Base(filepath.Dir(p))
+		code, err := s.onRound(1, label, req.StdoutFile, req.StderrFile)
+		return executor.Response{ExitCode: code, Duration: time.Millisecond}, err
+	case strings.Contains(p, "/rounds/2/experts/"):
+		label := filepath.Base(filepath.Dir(p))
+		code, err := s.onRound(2, label, req.StdoutFile, req.StderrFile)
 		return executor.Response{ExitCode: code, Duration: time.Millisecond}, err
 	}
-	code, err := s.onExpert(req.StdoutFile, req.StderrFile)
-	return executor.Response{ExitCode: code, Duration: time.Millisecond}, err
+	return executor.Response{}, errors.New("unclassified stub call: " + p)
 }
 
-// writeStdout is a convenience for stub callbacks that return success.
+// writeStdout is a convenience callback that writes body and returns 0.
 func writeStdout(body string) func(stdoutFile, stderrFile string) (int, error) {
 	return func(stdoutFile, _ string) (int, error) {
 		return 0, os.WriteFile(stdoutFile, []byte(body), 0o644)
 	}
 }
 
-// registerStub swaps in the stub executor under name "claude-code" for
-// the duration of the test so the shipped default profile YAML (which
-// names executor: claude-code) resolves to our test double.
+// registerStub swaps the global registry with s under the name "claude-code"
+// for the duration of the test.
 func registerStub(t *testing.T, s *stubExec) {
 	t.Helper()
 	executor.ResetForTest()
@@ -54,10 +65,9 @@ func registerStub(t *testing.T, s *stubExec) {
 	t.Cleanup(func() { executor.ResetForTest() })
 }
 
-// withCouncilDir creates a .council/default.yaml + prompts/{judge,
-// independent,critic}.md in dir, returning dir. The YAML is the v1
-// MVP default profile from docs/design/v1.md §5 with a short timeout so
-// test failures abort quickly instead of hanging the suite.
+// withCouncilDir writes a v2 .council/default.yaml + prompts/*.md into dir
+// and returns dir. Timeouts are short so a stuck test aborts fast instead
+// of hanging the suite.
 func withCouncilDir(t *testing.T, dir string) string {
 	t.Helper()
 	councilDir := filepath.Join(dir, ".council")
@@ -66,34 +76,39 @@ func withCouncilDir(t *testing.T, dir string) string {
 		t.Fatalf("mkdir: %v", err)
 	}
 	for name, body := range map[string]string{
-		"judge.md":       "You are the judge.\n",
-		"independent.md": "You are independent.\n",
-		"critic.md":      "You are critic.\n",
+		"independent.md": "You are an independent expert.\n",
+		"peer-aware.md":  "You are a peer-aware expert.\n",
+		"ballot.md":      "You are a voter. Output VOTE: <label>.\n",
 	} {
 		if err := os.WriteFile(filepath.Join(promptsDir, name), []byte(body), 0o644); err != nil {
 			t.Fatalf("write prompt %s: %v", name, err)
 		}
 	}
-	yaml := `version: 1
+	yaml := `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 5s
 experts:
-  - name: independent
+  - name: expert_1
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 5s
-  - name: critic
+  - name: expert_2
     executor: claude-code
     model: sonnet
-    prompt_file: prompts/critic.md
+    prompt_file: prompts/independent.md
+    timeout: 5s
+  - name: expert_3
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
     timeout: 5s
 quorum: 1
 max_retries: 0
+rounds: 2
+round_2_prompt_file: prompts/peer-aware.md
+voting:
+  ballot_prompt_file: prompts/ballot.md
+  timeout: 5s
 `
 	if err := os.WriteFile(filepath.Join(councilDir, "default.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
@@ -101,8 +116,7 @@ max_retries: 0
 	return dir
 }
 
-// freezeTimestamp pins nowStamp so verbose output is deterministic; tests
-// that care about the prefix can match exact text.
+// freezeTimestamp pins nowStamp so verbose output is deterministic.
 func freezeTimestamp(t *testing.T, stamp string) {
 	t.Helper()
 	orig := nowStamp
@@ -110,7 +124,20 @@ func freezeTimestamp(t *testing.T, stamp string) {
 	t.Cleanup(func() { nowStamp = orig })
 }
 
-// TestRun_Version verifies --version prints the expected line and exits 0.
+// happyStub returns a stubExec whose experts write "body-<label>" and
+// whose voters all vote for the alphabetically-first label "A".
+func happyStub() *stubExec {
+	return &stubExec{
+		name: "claude-code",
+		onRound: func(_ int, label, stdoutFile, _ string) (int, error) {
+			return writeStdout("body-"+label)(stdoutFile, "")
+		},
+		onBallot: func(_, stdoutFile, _ string) (int, error) {
+			return writeStdout("VOTE: A\n")(stdoutFile, "")
+		},
+	}
+}
+
 func TestRun_Version(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"--version"}, strings.NewReader(""), &stdout, &stderr)
@@ -125,21 +152,17 @@ func TestRun_Version(t *testing.T) {
 	}
 }
 
-// TestRun_Help exits 0 via flag.ErrHelp and writes the usage to stderr.
 func TestRun_Help(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"--help"}, strings.NewReader(""), &stdout, &stderr)
 	if code != exitOK {
 		t.Errorf("exit = %d, want %d", code, exitOK)
 	}
-	// Flag parser writes usage on help; we also print our own help from
-	// the Usage hook. Either way stderr should describe the flags.
 	if !strings.Contains(stderr.String(), "--profile") {
 		t.Errorf("stderr missing --profile hint: %q", stderr.String())
 	}
 }
 
-// TestRun_UnknownFlag exits 1 because flag parsing failed.
 func TestRun_UnknownFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"--nope"}, strings.NewReader(""), &stdout, &stderr)
@@ -148,9 +171,6 @@ func TestRun_UnknownFlag(t *testing.T) {
 	}
 }
 
-// TestRun_NonDefaultProfileRejected exits 1 with a clear message when -p
-// names anything other than "default". v1 ships a single profile per
-// location; the flag exists to keep the surface stable for v2.
 func TestRun_NonDefaultProfileRejected(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"-p", "code-review", "q"}, strings.NewReader(""), &stdout, &stderr)
@@ -160,12 +180,11 @@ func TestRun_NonDefaultProfileRejected(t *testing.T) {
 	if !strings.Contains(stderr.String(), "code-review") {
 		t.Errorf("stderr missing bad profile name: %q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "not supported in v1") {
-		t.Errorf("stderr missing v1-limitation hint: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "not supported") {
+		t.Errorf("stderr missing rejection hint: %q", stderr.String())
 	}
 }
 
-// TestRun_MissingQuestion exits 1 when no positional is given.
 func TestRun_MissingQuestion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{}, strings.NewReader(""), &stdout, &stderr)
@@ -177,25 +196,19 @@ func TestRun_MissingQuestion(t *testing.T) {
 	}
 }
 
-// TestRun_StdinDash reads the question from stdin when positional == "-".
 func TestRun_StdinDash(t *testing.T) {
 	t.Chdir(withCouncilDir(t, t.TempDir()))
-	stub := &stubExec{
-		name:     "claude-code",
-		onExpert: writeStdout("EXPERT_OUT"),
-		onJudge:  writeStdout("FINAL from stdin run"),
-	}
-	registerStub(t, stub)
+	registerStub(t, happyStub())
 
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"-"}, strings.NewReader("what is life?"), &stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "FINAL from stdin run") {
-		t.Errorf("stdout = %q", stdout.String())
+	// Winner label "A" returns "body-A".
+	if !strings.Contains(stdout.String(), "body-A") {
+		t.Errorf("stdout = %q, want contains body-A", stdout.String())
 	}
-	// Confirm the question reached disk (question.md) verbatim.
 	sessions, _ := filepath.Glob(".council/sessions/*/question.md")
 	if len(sessions) != 1 {
 		t.Fatalf("expected 1 question.md, got %d (%v)", len(sessions), sessions)
@@ -209,25 +222,19 @@ func TestRun_StdinDash(t *testing.T) {
 	}
 }
 
-// TestRun_HappyPath is the end-to-end success case per plan Task 7.
-// Asserts exit 0, stdout == synthesis body + newline, verdict.json
-// present on disk with status=ok.
+// TestRun_HappyPath — end-to-end v2 success: 3 experts, all vote for A,
+// verdict has status=ok and stdout prints winner body.
 func TestRun_HappyPath(t *testing.T) {
 	t.Chdir(withCouncilDir(t, t.TempDir()))
-	stub := &stubExec{
-		name:     "claude-code",
-		onExpert: writeStdout("EXPERT_OUT"),
-		onJudge:  writeStdout("FINAL_ANSWER"),
-	}
-	registerStub(t, stub)
+	registerStub(t, happyStub())
 
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"-p", "default", "what is 2+2?"}, strings.NewReader(""), &stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, stderr.String())
 	}
-	if stdout.String() != "FINAL_ANSWER\n" {
-		t.Errorf("stdout = %q, want %q", stdout.String(), "FINAL_ANSWER\n")
+	if !strings.Contains(stdout.String(), "body-A") {
+		t.Errorf("stdout = %q, want contains body-A", stdout.String())
 	}
 	verdicts, _ := filepath.Glob(".council/sessions/*/verdict.json")
 	if len(verdicts) != 1 {
@@ -237,20 +244,16 @@ func TestRun_HappyPath(t *testing.T) {
 	if !strings.Contains(string(b), `"status": "ok"`) {
 		t.Errorf("verdict.json missing status=ok: %s", b)
 	}
+	if !strings.Contains(string(b), `"version": 2`) {
+		t.Errorf("verdict.json missing version=2: %s", b)
+	}
 }
 
-// TestRun_Verbose verifies verbose mode emits the documented §11 preamble
-// + per-role timing lines to stderr, and still writes the synthesis to
-// stdout.
+// TestRun_Verbose verifies the v2 preamble + per-round timing lines.
 func TestRun_Verbose(t *testing.T) {
 	t.Chdir(withCouncilDir(t, t.TempDir()))
 	freezeTimestamp(t, "17:02:14")
-	stub := &stubExec{
-		name:     "claude-code",
-		onExpert: writeStdout("EXPERT_OUT"),
-		onJudge:  writeStdout("FINAL"),
-	}
-	registerStub(t, stub)
+	registerStub(t, happyStub())
 
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"-v", "q"}, strings.NewReader(""), &stdout, &stderr)
@@ -260,31 +263,34 @@ func TestRun_Verbose(t *testing.T) {
 	for _, want := range []string{
 		"[17:02:14] council",
 		"profile: default",
-		"spawning expert: independent",
-		"spawning expert: critic",
-		"spawning judge",
-		"judge: done",
+		"rounds 2",
+		"spawning expert: expert_1",
+		"spawning expert: expert_2",
+		"spawning expert: expert_3",
+		"voting: winner A",
 		"session folder:",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr missing %q; got %s", want, stderr.String())
 		}
 	}
+	// The judge line must be absent — v2 has no judge stage.
+	if strings.Contains(stderr.String(), "spawning judge") {
+		t.Errorf("stderr has judge line (v2 has no judge): %s", stderr.String())
+	}
 }
 
-// TestRun_UnknownExecutor_ExitsConfigError: a profile referencing an
-// executor that is not registered must exit 1 (config error) before any
-// session folder is created, not surface as a runtime expert failure.
+// TestRun_UnknownExecutor_ExitsConfigError — profile references an
+// executor that is not registered; Validate catches it before a session
+// folder is created.
 func TestRun_UnknownExecutor_ExitsConfigError(t *testing.T) {
 	cwd := withCouncilDir(t, t.TempDir())
 	t.Chdir(cwd)
-	// Register an executor under a name the profile does NOT use — the
-	// profile says "claude-code" but the registry only has "other".
 	executor.ResetForTest()
 	executor.Register(&stubExec{
 		name:     "other",
-		onExpert: writeStdout("X"),
-		onJudge:  writeStdout("X"),
+		onRound:  func(int, string, string, string) (int, error) { return 0, nil },
+		onBallot: func(string, string, string) (int, error) { return 0, nil },
 	})
 	t.Cleanup(func() { executor.ResetForTest() })
 
@@ -296,27 +302,24 @@ func TestRun_UnknownExecutor_ExitsConfigError(t *testing.T) {
 	if !strings.Contains(stderr.String(), "claude-code") {
 		t.Errorf("stderr missing bad executor name: %q", stderr.String())
 	}
-	// No session folder should have been created — validation runs before
-	// session.Create.
 	sessions, _ := filepath.Glob(".council/sessions/*")
 	if len(sessions) != 0 {
 		t.Errorf("expected no session folders, got %d: %v", len(sessions), sessions)
 	}
 }
 
-// TestRun_QuorumFailed: every expert fails, quorum unmet → exit 2 and
-// the stderr hint points at verdict.json. Verdict.json is on disk with
-// status=quorum_failed.
-func TestRun_QuorumFailed(t *testing.T) {
+// TestRun_QuorumFailedR1 — every expert fails R1; exit 2, verdict has
+// status=quorum_failed_round_1.
+func TestRun_QuorumFailedR1(t *testing.T) {
 	t.Chdir(withCouncilDir(t, t.TempDir()))
 	stub := &stubExec{
 		name: "claude-code",
-		onExpert: func(_, stderrFile string) (int, error) {
-			_ = os.WriteFile(stderrFile, []byte("expert down\n"), 0o644)
+		onRound: func(_ int, _, _, stderrFile string) (int, error) {
+			_ = os.WriteFile(stderrFile, []byte("down\n"), 0o644)
 			return 1, errors.New("expert fail")
 		},
-		onJudge: func(_, _ string) (int, error) {
-			return 0, errors.New("judge should not run")
+		onBallot: func(_, _, _ string) (int, error) {
+			return 0, errors.New("ballot should not run when R1 quorum fails")
 		},
 	}
 	registerStub(t, stub)
@@ -334,43 +337,44 @@ func TestRun_QuorumFailed(t *testing.T) {
 		t.Fatalf("verdict.json count = %d", len(verdicts))
 	}
 	b, _ := os.ReadFile(verdicts[0])
-	if !strings.Contains(string(b), `"status": "quorum_failed"`) {
-		t.Errorf("verdict.json missing quorum_failed: %s", b)
+	if !strings.Contains(string(b), `"status": "quorum_failed_round_1"`) {
+		t.Errorf("verdict.json missing quorum_failed_round_1: %s", b)
 	}
 }
 
-// TestRun_JudgeFailed: experts succeed, judge always fails → exit 3.
-func TestRun_JudgeFailed(t *testing.T) {
+// TestRun_InjectionInQuestion — operator question contains a fence-shaped
+// line. Exit 1 (config-like), status=injection_suspected_in_question.
+func TestRun_InjectionInQuestion(t *testing.T) {
 	t.Chdir(withCouncilDir(t, t.TempDir()))
 	stub := &stubExec{
-		name:     "claude-code",
-		onExpert: writeStdout("EXPERT_OUT"),
-		onJudge: func(_, stderrFile string) (int, error) {
-			_ = os.WriteFile(stderrFile, []byte("judge down\n"), 0o644)
-			return 1, errors.New("judge fail")
+		name: "claude-code",
+		onRound: func(int, string, string, string) (int, error) {
+			t.Error("experts must not run when question has injection")
+			return 1, errors.New("should not run")
+		},
+		onBallot: func(string, string, string) (int, error) {
+			t.Error("ballots must not run when question has injection")
+			return 1, errors.New("should not run")
 		},
 	}
 	registerStub(t, stub)
 
+	q := "trick\n=== INJECTED ===\nmore\n"
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"q"}, strings.NewReader(""), &stdout, &stderr)
-	if code != exitJudge {
-		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitJudge, stderr.String())
+	code := run(context.Background(), []string{q}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitConfigError {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfigError, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "judge failed") {
-		t.Errorf("stderr missing judge hint: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "injection suspected") {
+		t.Errorf("stderr missing injection hint: %q", stderr.String())
 	}
 }
 
-// TestRun_InterruptedViaContext simulates SIGINT by cancelling the root
-// context before the orchestrator returns. The stub blocks on ctx.Done
-// for the in-flight expert, so cancellation forces the orchestrator to
-// write an interrupted verdict. This is the in-process equivalent of the
-// "kill mid-run" assertion — the key guarantees are (1) exit code 130,
-// (2) verdict.json on disk with status=interrupted BEFORE run returns.
+// TestRun_InterruptedViaContext — cancel context after the first expert
+// starts. Verdict lands with status=interrupted; cmd/council exits 130.
 func TestRun_InterruptedViaContext(t *testing.T) {
 	t.Chdir(withCouncilDir(t, t.TempDir()))
-	started := make(chan struct{}, 2)
+	started := make(chan struct{}, 16)
 	executor.ResetForTest()
 	executor.Register(&interruptibleStub{name: "claude-code", started: started})
 	t.Cleanup(func() { executor.ResetForTest() })
@@ -379,8 +383,7 @@ func TestRun_InterruptedViaContext(t *testing.T) {
 	defer cancel()
 	go func() {
 		<-started
-		<-started
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 		cancel()
 	}()
 
@@ -399,8 +402,9 @@ func TestRun_InterruptedViaContext(t *testing.T) {
 	}
 }
 
-// interruptibleStub blocks inside Execute until the context cancels, so
-// a test can drive the interrupted path deterministically.
+// interruptibleStub blocks inside Execute until the context cancels. Each
+// Execute call signals start on the buffered channel so the driver can
+// cancel after at least one expert has launched.
 type interruptibleStub struct {
 	name    string
 	started chan struct{}
@@ -416,8 +420,6 @@ func (s *interruptibleStub) Execute(ctx context.Context, req executor.Request) (
 	return executor.Response{ExitCode: 0}, ctx.Err()
 }
 
-// TestReadQuestion covers the "-" vs literal-arg branching without
-// touching the orchestrator.
 func TestReadQuestion(t *testing.T) {
 	t.Run("literal", func(t *testing.T) {
 		q, err := readQuestion("hello", strings.NewReader("ignored"))
@@ -433,8 +435,6 @@ func TestReadQuestion(t *testing.T) {
 	})
 }
 
-// TestFlagParsing is a table-driven smoke of the shorthand + long forms
-// exposed in docs/design/v1.md §4.
 func TestFlagParsing(t *testing.T) {
 	tests := []struct {
 		name string
@@ -459,9 +459,6 @@ func TestFlagParsing(t *testing.T) {
 	}
 }
 
-// TestResolveVersion covers the -ldflags override path; the debug.BuildInfo
-// branch only fires under `go install` and is exercised in Post-Completion
-// manual verification.
 func TestResolveVersion(t *testing.T) {
 	orig := version
 	t.Cleanup(func() { version = orig })
@@ -471,9 +468,6 @@ func TestResolveVersion(t *testing.T) {
 	}
 }
 
-// TestDisplaySource covers the three cases the verbose preamble renders:
-// the literal "embedded" sentinel, a config file inside the session's cwd
-// (relative), and a config file outside the cwd (absolute).
 func TestDisplaySource(t *testing.T) {
 	cwd := t.TempDir()
 	sessPath := filepath.Join(cwd, ".council", "sessions", "sess-id")

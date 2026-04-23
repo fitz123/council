@@ -206,6 +206,122 @@ func TestMock_UnknownBehavior(t *testing.T) {
 	}
 }
 
+// TestMock_BallotDefaultVotesA verifies the ballot override: any request
+// whose StdoutFile lives under `voting/votes/` produces `VOTE: A\n`, no
+// matter which expert behavior is selected. This is the glue that lets
+// F3/F4/F6 reach exit 0 under v2 — their expert-stage behavior doesn't
+// know about ballots, but the dispatcher does.
+func TestMock_BallotDefaultVotesA(t *testing.T) {
+	withEnv(t, EnvName, "trivial")
+	dir := t.TempDir()
+	votesDir := filepath.Join(dir, "voting", "votes")
+	if err := os.MkdirAll(votesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	req := executor.Request{
+		Prompt:     "ballot prompt",
+		Model:      "sonnet",
+		Timeout:    time.Second,
+		StdoutFile: filepath.Join(votesDir, "B.txt"),
+		StderrFile: filepath.Join(votesDir, "B.stderr.log"),
+	}
+	m := &Mock{}
+	if _, err := m.Execute(context.Background(), req); err != nil {
+		t.Fatalf("ballot: %v", err)
+	}
+	body, err := os.ReadFile(req.StdoutFile)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if string(body) != "VOTE: A\n" {
+		t.Fatalf("ballot body = %q, want %q", body, "VOTE: A\n")
+	}
+}
+
+// TestMock_BallotSelfVoteTie verifies self_vote_tie: every voter votes for
+// its own label, producing an N-way tie in the tally. Exercised end-to-end
+// by the F12 smoke test.
+func TestMock_BallotSelfVoteTie(t *testing.T) {
+	withEnv(t, EnvName, "self_vote_tie")
+	dir := t.TempDir()
+	votesDir := filepath.Join(dir, "voting", "votes")
+	if err := os.MkdirAll(votesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, label := range []string{"A", "B", "C"} {
+		req := executor.Request{
+			Prompt:     "ballot prompt",
+			Model:      "sonnet",
+			Timeout:    time.Second,
+			StdoutFile: filepath.Join(votesDir, label+".txt"),
+			StderrFile: filepath.Join(votesDir, label+".stderr.log"),
+		}
+		m := &Mock{}
+		if _, err := m.Execute(context.Background(), req); err != nil {
+			t.Fatalf("ballot %s: %v", label, err)
+		}
+		body, err := os.ReadFile(req.StdoutFile)
+		if err != nil {
+			t.Fatalf("read %s: %v", label, err)
+		}
+		want := "VOTE: " + label + "\n"
+		if string(body) != want {
+			t.Fatalf("ballot %s body = %q, want %q", label, body, want)
+		}
+	}
+}
+
+// TestMock_ForgeFenceR1 verifies the forgery mode: the alphabetically-first
+// R1 expert emits a line-anchored `=== … ===` fence that prompt.CheckForgery
+// must reject. Other expert paths and ballots behave normally.
+func TestMock_ForgeFenceR1(t *testing.T) {
+	withEnv(t, EnvName, "forge_fence_r1")
+	dir := t.TempDir()
+
+	// Label A R1 path — should produce a forged fence.
+	r1a := filepath.Join(dir, "rounds", "1", "experts", "A")
+	if err := os.MkdirAll(r1a, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	reqA := executor.Request{
+		StdoutFile: filepath.Join(r1a, "output.md"),
+		StderrFile: filepath.Join(r1a, "stderr.log"),
+		Timeout:    time.Second,
+	}
+	m := &Mock{}
+	if _, err := m.Execute(context.Background(), reqA); err != nil {
+		t.Fatalf("A R1: %v", err)
+	}
+	body, err := os.ReadFile(reqA.StdoutFile)
+	if err != nil {
+		t.Fatalf("read A: %v", err)
+	}
+	if !strings.Contains(string(body), "=== EXPERT:") {
+		t.Fatalf("A R1 body %q should contain a forged fence", body)
+	}
+
+	// Label B R1 path — should produce a clean trivial output.
+	r1b := filepath.Join(dir, "rounds", "1", "experts", "B")
+	if err := os.MkdirAll(r1b, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	reqB := executor.Request{
+		StdoutFile: filepath.Join(r1b, "output.md"),
+		StderrFile: filepath.Join(r1b, "stderr.log"),
+		Timeout:    time.Second,
+	}
+	if _, err := m.Execute(context.Background(), reqB); err != nil {
+		t.Fatalf("B R1: %v", err)
+	}
+	bodyB, err := os.ReadFile(reqB.StdoutFile)
+	if err != nil {
+		t.Fatalf("read B: %v", err)
+	}
+	if strings.Contains(string(bodyB), "=== EXPERT:") {
+		t.Fatalf("B R1 body %q should not contain a fence", bodyB)
+	}
+}
+
 func TestMock_RegistersUnderClaudeCode(t *testing.T) {
 	// init() in this package registers the Mock under "claude-code".
 	// The release-binary ClaudeCode would do the same, but its

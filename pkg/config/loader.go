@@ -15,9 +15,9 @@ import (
 )
 
 // expertNameRE is the allowed character set for expert names. Names flow
-// through filepath.Join (pkg/session.Session.ExpertDir) and are embedded in
-// prompt delimiters (pkg/prompt.BuildJudge's `=== EXPERT: <name> ===`), so
-// anything outside `[a-zA-Z0-9_-]` risks path traversal or prompt confusion.
+// through filepath.Join (pkg/session.Session.RoundExpertDir) and appear in
+// verdict.json and aggregate output, so anything outside `[a-zA-Z0-9_-]`
+// risks path traversal or downstream text confusion.
 // Must start with an alphanumeric to keep hidden-file shapes like ".hidden"
 // out of the session folder.
 var expertNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
@@ -53,19 +53,42 @@ type yamlRole struct {
 	Timeout    string `yaml:"timeout"`
 }
 
+// yamlVoting is the wire format for the v2 voting stage. ballot_prompt_file
+// is required (or its inlined snapshot form ballot_prompt_body). timeout is
+// optional — zero means downstream code picks its own default.
+type yamlVoting struct {
+	BallotPromptFile string `yaml:"ballot_prompt_file,omitempty"`
+	BallotPromptBody string `yaml:"ballot_prompt_body,omitempty"`
+	Timeout          string `yaml:"timeout,omitempty"`
+}
+
 type yamlProfile struct {
-	Version    int        `yaml:"version"`
-	Name       string     `yaml:"name"`
-	Judge      yamlRole   `yaml:"judge"`
-	Experts    []yamlRole `yaml:"experts"`
-	Quorum     int        `yaml:"quorum"`
-	MaxRetries int        `yaml:"max_retries"`
+	Version          int        `yaml:"version"`
+	Name             string     `yaml:"name"`
+	Experts          []yamlRole `yaml:"experts"`
+	Quorum           int        `yaml:"quorum"`
+	MaxRetries       int        `yaml:"max_retries"`
+	Rounds           int        `yaml:"rounds"`
+	Round2PromptFile string     `yaml:"round_2_prompt_file,omitempty"`
+	Round2PromptBody string     `yaml:"round_2_prompt_body,omitempty"`
+	Voting           yamlVoting `yaml:"voting"`
+	// Judge is accepted solely so a v1 profile (which always carried a
+	// judge: block) gets the curated "version 1 not supported" migration
+	// error instead of a cryptic "field judge not found" from KnownFields.
+	// The field is otherwise ignored.
+	Judge *yamlRole `yaml:"judge,omitempty"`
+	// SessionNonce is only present on per-session snapshots written by
+	// pkg/session; source-config YAML never sets it. Decoded here so strict
+	// KnownFields parsing accepts snapshots round-tripped through LoadFile.
+	// Profile itself does not carry the nonce — it belongs to session state,
+	// not profile state. Use LoadSnapshot to get the nonce back.
+	SessionNonce string `yaml:"session_nonce,omitempty"`
 }
 
 // Load resolves the profile with precedence:
 //  1. <cwd>/.council/default.yaml
 //  2. <home>/.config/council/default.yaml
-//  3. embedded defaults (populated by pkg/config/embed.go in Task 8)
+//  3. embedded defaults
 //
 // It returns the parsed Profile, the source path ("embedded" for the embedded
 // fallback), and any error.
@@ -113,22 +136,40 @@ func Load(cwd string) (*Profile, string, error) {
 // resolved relative to the directory containing path; the resulting
 // RoleConfig.PromptFile is always absolute.
 func LoadFile(path string) (*Profile, error) {
+	p, _, err := loadFileWithNonce(path)
+	return p, err
+}
+
+// LoadSnapshot loads a per-session snapshot and returns the profile plus the
+// session_nonce recorded at write time. Used by pkg/session.LoadExisting /
+// resume (D14) to recover the nonce without re-generating it. Returns an
+// empty nonce string if the file did not record one (e.g., a source-config
+// YAML accidentally passed through this path).
+func LoadSnapshot(path string) (*Profile, string, error) {
+	return loadFileWithNonce(path)
+}
+
+func loadFileWithNonce(path string) (*Profile, string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve config path %s: %w", path, err)
+		return nil, "", fmt.Errorf("resolve config path %s: %w", path, err)
 	}
 	f, err := os.Open(abs)
 	if err != nil {
-		return nil, fmt.Errorf("open config %s: %w", abs, err)
+		return nil, "", fmt.Errorf("open config %s: %w", abs, err)
 	}
 	defer f.Close()
 
 	var y yamlProfile
 	if err := decodeStrict(f, &y); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", abs, err)
+		return nil, "", fmt.Errorf("parse %s: %w", abs, err)
 	}
 
-	return buildProfile(&y, filepath.Dir(abs), os.ReadFile)
+	p, err := buildProfile(&y, filepath.Dir(abs), os.ReadFile)
+	if err != nil {
+		return nil, "", err
+	}
+	return p, y.SessionNonce, nil
 }
 
 func decodeStrict(r io.Reader, out *yamlProfile) error {
@@ -137,7 +178,7 @@ func decodeStrict(r io.Reader, out *yamlProfile) error {
 	if err := dec.Decode(out); err != nil {
 		return err
 	}
-	// v1 profiles are single-document. A trailing `---\neffort: bogus`
+	// v2 profiles are single-document. A trailing `---\neffort: bogus`
 	// would otherwise silently bypass KnownFields strictness, so require
 	// EOF after the first document.
 	var extra yaml.Node
@@ -160,8 +201,17 @@ func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Pro
 	if y.Version == 0 {
 		return nil, fmt.Errorf("missing required field: version")
 	}
-	if y.Version != 1 {
-		return nil, fmt.Errorf("unsupported version %d (expected 1)", y.Version)
+	if y.Version == 1 {
+		return nil, fmt.Errorf("version 1 profiles are not supported by this binary (v2 debate engine); add `rounds: 2` and a `voting:` block with `ballot_prompt_file:`, then bump `version: 2`")
+	}
+	if y.Version != 2 {
+		return nil, fmt.Errorf("unsupported version %d (expected 2)", y.Version)
+	}
+	// v2 retired the judge role (D15). A stray `judge:` block in a v2 profile
+	// usually means an in-progress migration — reject loudly rather than
+	// parsing successfully with the block silently ignored.
+	if y.Judge != nil {
+		return nil, fmt.Errorf("version 2 profiles must not include a judge block (the judge role was retired in favour of ballot voting)")
 	}
 	if y.Name == "" {
 		return nil, fmt.Errorf("missing required field: name")
@@ -172,13 +222,14 @@ func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Pro
 	if y.MaxRetries < 0 {
 		return nil, fmt.Errorf("max_retries must be >= 0, got %d", y.MaxRetries)
 	}
-	if len(y.Experts) == 0 {
-		return nil, fmt.Errorf("missing required field: experts (must have at least one)")
+	if y.Rounds != 2 {
+		return nil, fmt.Errorf("rounds must be 2 (v2 ships K=2 only; K=1 and K>=3 deferred to v3), got %d", y.Rounds)
 	}
-
-	judge, err := buildRole(&y.Judge, resolveBase, readFile, "judge")
-	if err != nil {
-		return nil, err
+	// Debate requires >= 2 voices (R1 + R2 + voting all need at least two
+	// candidates to compare). v1 ADR-0005 set the same floor for the judged
+	// flow; v2 keeps it.
+	if len(y.Experts) < 2 {
+		return nil, fmt.Errorf("experts must have at least 2 entries (debate requires >= 2 voices), got %d", len(y.Experts))
 	}
 
 	experts := make([]RoleConfig, 0, len(y.Experts))
@@ -214,14 +265,63 @@ func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Pro
 		return nil, fmt.Errorf("quorum %d exceeds expert count %d (every run would fail)", y.Quorum, len(experts))
 	}
 
+	voting, err := buildVoting(&y.Voting, resolveBase, readFile)
+	if err != nil {
+		return nil, err
+	}
+
+	r2Prompt, err := buildRound2Prompt(y.Round2PromptFile, y.Round2PromptBody, resolveBase, readFile)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Profile{
-		Version:    y.Version,
-		Name:       y.Name,
-		Judge:      *judge,
-		Experts:    experts,
-		Quorum:     y.Quorum,
-		MaxRetries: y.MaxRetries,
+		Version:      y.Version,
+		Name:         y.Name,
+		Experts:      experts,
+		Quorum:       y.Quorum,
+		MaxRetries:   y.MaxRetries,
+		Rounds:       y.Rounds,
+		Round2Prompt: r2Prompt,
+		Voting:       voting,
 	}, nil
+}
+
+// buildRound2Prompt resolves the profile-level R2 role prompt (design §3.4's
+// `[peer-aware role prompt]`). Required in v2 because R2 replaces the R1 role
+// body with this one — omitting it would silently fall through to the R1
+// prompt, which is what motivated peer-aware.md being created in the first
+// place. round_2_prompt_body wins over round_2_prompt_file (same
+// snapshot/source-config split as roles and voting).
+func buildRound2Prompt(file, body, baseDir string, readFile readFileFn) (PromptSource, error) {
+	if file == "" && body == "" {
+		return PromptSource{}, fmt.Errorf("missing required field: round_2_prompt_file (or inline round_2_prompt_body)")
+	}
+	promptPath := file
+	if promptPath != "" && !filepath.IsAbs(promptPath) {
+		promptPath = filepath.Join(baseDir, promptPath)
+	}
+	if promptPath != "" {
+		promptPath = filepath.Clean(promptPath)
+	}
+	var buf []byte
+	if body != "" {
+		buf = []byte(body)
+	} else {
+		var rerr error
+		buf, rerr = readFile(promptPath)
+		if rerr != nil {
+			return PromptSource{}, fmt.Errorf("read round_2_prompt_file %s: %w", promptPath, rerr)
+		}
+	}
+	if hasYAMLFrontmatter(buf) {
+		source := promptPath
+		if source == "" {
+			source = "<inline round_2_prompt_body>"
+		}
+		return PromptSource{}, fmt.Errorf("round_2 prompt %s starts with YAML frontmatter", source)
+	}
+	return PromptSource{File: promptPath, Body: string(buf)}, nil
 }
 
 // hasYAMLFrontmatter reports whether body begins with a `---` line followed
@@ -312,5 +412,55 @@ func buildRole(y *yamlRole, baseDir string, readFile readFileFn, label string) (
 		PromptFile: promptPath,
 		Timeout:    d,
 		PromptBody: string(body),
+	}, nil
+}
+
+// buildVoting validates the voting block and loads the ballot prompt body so
+// reload is independent of the original prompt file (matches RoleConfig
+// semantics). ballot_prompt_body wins over ballot_prompt_file when both are
+// present — same snapshot/source-config split as roles.
+func buildVoting(y *yamlVoting, baseDir string, readFile readFileFn) (VotingConfig, error) {
+	if y.BallotPromptFile == "" && y.BallotPromptBody == "" {
+		return VotingConfig{}, fmt.Errorf("voting: missing required field: ballot_prompt_file (or inline ballot_prompt_body)")
+	}
+	promptPath := y.BallotPromptFile
+	if promptPath != "" && !filepath.IsAbs(promptPath) {
+		promptPath = filepath.Join(baseDir, promptPath)
+	}
+	if promptPath != "" {
+		promptPath = filepath.Clean(promptPath)
+	}
+	var body []byte
+	if y.BallotPromptBody != "" {
+		body = []byte(y.BallotPromptBody)
+	} else {
+		var rerr error
+		body, rerr = readFile(promptPath)
+		if rerr != nil {
+			return VotingConfig{}, fmt.Errorf("voting: read ballot_prompt_file %s: %w", promptPath, rerr)
+		}
+	}
+	if hasYAMLFrontmatter(body) {
+		source := promptPath
+		if source == "" {
+			source = "<inline ballot_prompt_body>"
+		}
+		return VotingConfig{}, fmt.Errorf("voting: ballot prompt %s starts with YAML frontmatter", source)
+	}
+	var d time.Duration
+	if y.Timeout != "" {
+		var err error
+		d, err = time.ParseDuration(y.Timeout)
+		if err != nil {
+			return VotingConfig{}, fmt.Errorf("voting: invalid timeout %q: %w", y.Timeout, err)
+		}
+		if d <= 0 {
+			return VotingConfig{}, fmt.Errorf("voting: timeout must be > 0, got %s", d)
+		}
+	}
+	return VotingConfig{
+		BallotPromptFile: promptPath,
+		BallotPromptBody: string(body),
+		Timeout:          d,
 	}, nil
 }

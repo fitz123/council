@@ -28,6 +28,7 @@ import (
 	// touching the production binary's wiring.
 
 	"github.com/fitz123/council/pkg/config"
+	"github.com/fitz123/council/pkg/debate"
 	"github.com/fitz123/council/pkg/orchestrator"
 	"github.com/fitz123/council/pkg/session"
 )
@@ -36,15 +37,21 @@ import (
 // main() falls back to runtime/debug.ReadBuildInfo.
 var version = ""
 
-// Exit codes per docs/design/v1.md §4. Kept as named constants so test
-// assertions read self-documenting rather than bare integers.
+// Exit codes per docs/design/v2.md §4. Kept as named constants so test
+// assertions read self-documenting rather than bare integers. v2 drops the
+// judge role, so exit 3 is retired; the tie path ("no_consensus") folds
+// into exit 2 alongside quorum-failed runs.
 const (
 	exitOK          = 0
 	exitConfigError = 1
 	exitQuorum      = 2
-	exitJudge       = 3
 	exitInterrupted = 130
 )
+
+// resumeSubcommand is the literal first-positional that switches `council`
+// from "run a fresh session" to "continue an existing one" (D14). Kept as a
+// constant so tests and the help text stay in sync.
+const resumeSubcommand = "resume"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -64,6 +71,14 @@ func main() {
 // returns ErrInterrupted is what lets us exit 130 immediately without a
 // second flush step here.
 func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// Subcommand dispatch: `council resume [--session <id>]` continues an
+	// already-materialised session. Detected before flag parsing so the
+	// resume flag set can carry its own --session option without
+	// colliding with the main flag set's -p / -v / --version.
+	if len(argv) > 0 && argv[0] == resumeSubcommand {
+		return runResume(ctx, argv[1:], stdout, stderr)
+	}
+
 	fs := flag.NewFlagSet("council", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { printHelp(stderr) }
@@ -116,11 +131,11 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		return exitConfigError
 	}
 
-	// v1 ships a single profile per location (default.yaml). Reject any
+	// v2 ships a single profile per location (default.yaml). Reject any
 	// other profile name up-front so a caller passing -p foo does not
-	// silently run against default.yaml. Multi-profile is a v2 hook.
+	// silently run against default.yaml. Multi-profile is a v3 hook.
 	if profileName != "default" {
-		fmt.Fprintf(stderr, "council: profile %q not supported in v1 (only \"default\" is available)\n", profileName)
+		fmt.Fprintf(stderr, "council: profile %q not supported (only \"default\" is available)\n", profileName)
 		return exitConfigError
 	}
 
@@ -138,7 +153,13 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		return exitConfigError
 	}
 
-	sess, err := createSession(cwd, profile, question)
+	nonce, err := debate.GenerateNonce()
+	if err != nil {
+		fmt.Fprintf(stderr, "council: generate session nonce: %v\n", err)
+		return exitConfigError
+	}
+
+	sess, err := createSession(cwd, profile, nonce, question)
 	if err != nil {
 		fmt.Fprintf(stderr, "council: create session: %v\n", err)
 		return exitConfigError
@@ -156,22 +177,28 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 
 	switch {
 	case err == nil:
-		// Normal-mode stdout: the synthesis body, plus a trailing newline
+		// Normal-mode stdout: the winner's R2 body, plus a trailing newline
 		// if the body didn't already end with one. The newline is purely
 		// terminal hygiene (so the next prompt doesn't land glued to the
-		// last line of output). Callers that need byte-exact synthesis
-		// should read rounds/1/judge/synthesis.md from the session folder.
+		// last line of output). Callers that need byte-exact output should
+		// read output.md from the session folder.
 		fmt.Fprint(stdout, v.Answer)
 		if !strings.HasSuffix(v.Answer, "\n") {
 			fmt.Fprintln(stdout)
 		}
 		return exitOK
-	case errors.Is(err, orchestrator.ErrQuorumFailed):
-		fmt.Fprintf(stderr, "council: quorum not met (see %s/verdict.json)\n", sess.Path)
+	case errors.Is(err, orchestrator.ErrInjectionInQuestion):
+		fmt.Fprintf(stderr, "council: injection suspected in question (see %s/verdict.json)\n", sess.Path)
+		return exitConfigError
+	case errors.Is(err, debate.ErrQuorumFailedR1):
+		fmt.Fprintf(stderr, "council: round 1 quorum not met (see %s/verdict.json)\n", sess.Path)
 		return exitQuorum
-	case errors.Is(err, orchestrator.ErrJudgeFailed):
-		fmt.Fprintf(stderr, "council: judge failed (see %s/verdict.json)\n", sess.Path)
-		return exitJudge
+	case errors.Is(err, debate.ErrQuorumFailedR2):
+		fmt.Fprintf(stderr, "council: round 2 quorum not met (see %s/verdict.json)\n", sess.Path)
+		return exitQuorum
+	case errors.Is(err, orchestrator.ErrNoConsensus):
+		fmt.Fprintf(stderr, "council: no consensus — tied candidates surfaced in %s/output-*.md\n", sess.Path)
+		return exitQuorum
 	case errors.Is(err, orchestrator.ErrInterrupted):
 		fmt.Fprintf(stderr, "council: interrupted (partial verdict at %s/verdict.json)\n", sess.Path)
 		return exitInterrupted
@@ -181,16 +208,149 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 	}
 }
 
+// runResume implements `council resume [--session <id>]` (D14). It locates
+// (or accepts an explicit) incomplete session, restores its state, and
+// reruns orchestrator.Run against it — the round runners and ballot runner
+// are idempotent on their per-stage .done markers, so completed work is
+// skipped and only the missing stages re-execute.
+//
+// Exit codes mirror the fresh-run path with one addition: ErrNoResumableSession
+// maps to exit 1 ("no_resumable_session") so an operator who runs `council
+// resume` against a clean tree gets a clear signal rather than a generic
+// "config error" miss.
+func runResume(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("council resume", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	var sessionID string
+	fs.StringVar(&sessionID, "session", "", "Resume the named session ID (default: newest incomplete).")
+
+	if err := fs.Parse(argv); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitConfigError
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "council resume: unexpected positional argument; use --session <id>")
+		return exitConfigError
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "council resume: getcwd: %v\n", err)
+		return exitConfigError
+	}
+	sessionsRoot := filepath.Join(cwd, ".council", "sessions")
+
+	var sessionPath string
+	if sessionID != "" {
+		// Reject any path-traversal or separator tokens in the session
+		// ID before joining: filepath.Join("..","..","x") escapes
+		// sessionsRoot and lets an attacker point at a directory
+		// whose profile.snapshot.yaml they control. NewID produces a
+		// single pathname segment (timestamp + petname), so a legal ID
+		// never contains these.
+		if sessionID == "." || sessionID == ".." ||
+			strings.ContainsAny(sessionID, `/\`) ||
+			strings.Contains(sessionID, "..") {
+			fmt.Fprintf(stderr, "council resume: invalid session id %q\n", sessionID)
+			return exitConfigError
+		}
+		sessionPath = filepath.Join(sessionsRoot, sessionID)
+		if _, err := os.Stat(sessionPath); err != nil {
+			fmt.Fprintf(stderr, "council resume: session %q: %v\n", sessionID, err)
+			return exitConfigError
+		}
+		// Explicit session IDs still have to satisfy the D14 finality
+		// predicate — otherwise `council resume --session <final-id>`
+		// would mutate a terminal session's verdict/output (rewrite
+		// timestamps, possibly change the winner if ballots got re-run).
+		if !session.IsResumable(sessionPath) {
+			fmt.Fprintf(stderr, "council resume: session %q is not resumable (already final or never progressed)\n", sessionID)
+			return exitConfigError
+		}
+	} else {
+		sessionPath, err = session.FindIncomplete(sessionsRoot)
+		if err != nil {
+			if errors.Is(err, session.ErrNoResumableSession) {
+				fmt.Fprintln(stderr, "council resume: no resumable session found")
+				return exitConfigError
+			}
+			fmt.Fprintf(stderr, "council resume: find incomplete: %v\n", err)
+			return exitConfigError
+		}
+	}
+
+	sess, err := session.LoadExisting(sessionPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "council resume: load %s: %v\n", sessionPath, err)
+		return exitConfigError
+	}
+	profile, _, err := config.LoadSnapshot(filepath.Join(sess.Path, "profile.snapshot.yaml"))
+	if err != nil {
+		fmt.Fprintf(stderr, "council resume: load profile snapshot: %v\n", err)
+		return exitConfigError
+	}
+	question, err := session.LoadQuestion(sess.Path)
+	if err != nil {
+		fmt.Fprintf(stderr, "council resume: load question: %v\n", err)
+		return exitConfigError
+	}
+
+	// Clean up a stranded verdict.json.tmp from a prior crash so the atomic
+	// O_EXCL writer in pkg/session.WriteVerdict can recreate it. Renamed
+	// .tmp files are gone after a successful WriteVerdict; one left over
+	// implies a crash between create and rename.
+	_ = os.Remove(filepath.Join(sess.Path, "verdict.json.tmp"))
+
+	if err := orchestrator.Validate(profile); err != nil {
+		fmt.Fprintf(stderr, "council resume: %v\n", err)
+		return exitConfigError
+	}
+
+	v, err := orchestrator.Run(ctx, profile, question, sess)
+	switch {
+	case err == nil:
+		fmt.Fprint(stdout, v.Answer)
+		if !strings.HasSuffix(v.Answer, "\n") {
+			fmt.Fprintln(stdout)
+		}
+		return exitOK
+	case errors.Is(err, orchestrator.ErrInjectionInQuestion):
+		fmt.Fprintf(stderr, "council resume: injection suspected in question (see %s/verdict.json)\n", sess.Path)
+		return exitConfigError
+	case errors.Is(err, debate.ErrQuorumFailedR1):
+		fmt.Fprintf(stderr, "council resume: round 1 quorum not met (see %s/verdict.json)\n", sess.Path)
+		return exitQuorum
+	case errors.Is(err, debate.ErrQuorumFailedR2):
+		fmt.Fprintf(stderr, "council resume: round 2 quorum not met (see %s/verdict.json)\n", sess.Path)
+		return exitQuorum
+	case errors.Is(err, orchestrator.ErrNoConsensus):
+		fmt.Fprintf(stderr, "council resume: no consensus — tied candidates surfaced in %s/output-*.md\n", sess.Path)
+		return exitQuorum
+	case errors.Is(err, orchestrator.ErrInterrupted):
+		fmt.Fprintf(stderr, "council resume: interrupted (partial verdict at %s/verdict.json)\n", sess.Path)
+		return exitInterrupted
+	default:
+		fmt.Fprintf(stderr, "council resume: %v\n", err)
+		return exitConfigError
+	}
+}
+
 // createSession allocates a session folder, retrying on os.ErrExist so a
 // NewID petname collision or a leftover stale directory does not overwrite
 // the earlier session's artifacts. The retry budget is tiny because
 // collisions are ~10^-9 per second — three attempts is overwhelming.
-func createSession(cwd string, profile *config.Profile, question string) (*session.Session, error) {
+//
+// nonce is the debate-engine session nonce (pkg/debate.GenerateNonce); it is
+// persisted in profile.snapshot.yaml so `council resume` can recover it.
+func createSession(cwd string, profile *config.Profile, nonce, question string) (*session.Session, error) {
 	const maxAttempts = 3
 	var lastErr error
 	for i := 0; i < maxAttempts; i++ {
 		id := session.NewID(time.Now())
-		sess, err := session.Create(cwd, id, profile, question)
+		sess, err := session.Create(cwd, id, profile, nonce, question)
 		if err == nil {
 			return sess, nil
 		}
@@ -235,19 +395,23 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   council [flags] "question"
   council [flags] -          # read question from stdin (until EOF)
+  council resume [--session ID]
   council --version
   council --help
 
 Flags:
-  -p, --profile NAME   Profile to use (default: "default"; v1 only accepts "default").
+  -p, --profile NAME   Profile to use (default: "default"; only "default" is currently supported).
   -v, --verbose        Stream structured progress to stderr.
       --version        Print version and exit.
 
+Subcommands:
+  resume               Continue the newest incomplete session, or the one named
+                       by --session. Re-runs any stage missing its .done marker.
+
 Exit codes:
   0    success
-  1    config / validation error
-  2    quorum not met
-  3    judge failed
+  1    config / validation / injection error / no resumable session
+  2    quorum not met, or no consensus (tied ballots)
   130  interrupted (SIGINT/SIGTERM)`)
 }
 
@@ -262,30 +426,34 @@ Exit codes:
 func logStart(w io.Writer, sess *session.Session, p *config.Profile, source string) {
 	ts := nowStamp()
 	fmt.Fprintf(w, "[%s] council %s — session %s\n", ts, resolveVersion(), sess.ID)
-	fmt.Fprintf(w, "[%s] profile: %s (%d experts, quorum %d) from %s\n",
-		ts, p.Name, len(p.Experts), p.Quorum, displaySource(source, sess))
+	fmt.Fprintf(w, "[%s] profile: %s (%d experts, quorum %d, rounds %d) from %s\n",
+		ts, p.Name, len(p.Experts), p.Quorum, p.Rounds, displaySource(source, sess))
 	for _, e := range p.Experts {
 		fmt.Fprintf(w, "[%s] spawning expert: %s (%s, %s)\n", ts, e.Name, e.Executor, e.Model)
 	}
-	fmt.Fprintf(w, "[%s] spawning judge (%s, %s)\n", ts, p.Judge.Executor, p.Judge.Model)
 }
 
 // logEnd emits the post-run timing summary in verbose mode. It reads
 // timings from the verdict that orchestrator.Run already populated, so
 // the on-disk verdict.json and the stderr stream agree byte-for-byte on
 // per-role durations.
-func logEnd(w io.Writer, sess *session.Session, v *session.VerdictV1) {
+func logEnd(w io.Writer, sess *session.Session, v *session.Verdict) {
 	if v == nil {
 		return
 	}
 	ts := nowStamp()
-	for _, e := range v.Rounds[0].Experts {
-		fmt.Fprintf(w, "[%s] expert %s: %s in %.1fs (retries=%d)\n",
-			ts, e.Name, e.Status, e.DurationSeconds, e.Retries)
+	for idx, r := range v.Rounds {
+		for _, e := range r.Experts {
+			fmt.Fprintf(w, "[%s] round %d expert %s (%s): %s in %.1fs (retries=%d)\n",
+				ts, idx+1, e.Label, e.RealName, e.Participation, e.DurationSeconds, e.Retries)
+		}
 	}
-	if v.Rounds[0].Judge.Executor != "" {
-		fmt.Fprintf(w, "[%s] judge: done in %.1fs (retries=%d)\n",
-			ts, v.Rounds[0].Judge.DurationSeconds, v.Rounds[0].Judge.Retries)
+	if v.Voting != nil {
+		if v.Voting.Winner != "" {
+			fmt.Fprintf(w, "[%s] voting: winner %s\n", ts, v.Voting.Winner)
+		} else if len(v.Voting.TiedCandidates) > 0 {
+			fmt.Fprintf(w, "[%s] voting: tied candidates %v\n", ts, v.Voting.TiedCandidates)
+		}
 	}
 	fmt.Fprintf(w, "[%s] session %s: %.1fs total\n", ts, v.Status, v.DurationSeconds)
 	fmt.Fprintf(w, "[%s] session folder: %s\n", ts, sess.Path)

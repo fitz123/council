@@ -9,55 +9,78 @@ import (
 	"path/filepath"
 )
 
-// VerdictV1 is the canonical machine-readable run index written to
-// verdict.json at session end. Field order, JSON tags, and types must match
-// docs/design/v1.md §6 byte-for-byte; the snapshot test in verdict_test.go
-// gates this contract.
-//
-// version stays 1 for the entire v1 release line. v2 bumps to 2 with a new
-// Go type to keep the schemas separable.
-type VerdictV1 struct {
-	Version         int     `json:"version"`
-	SessionID       string  `json:"session_id"`
-	SessionPath     string  `json:"session_path"`
-	Profile         string  `json:"profile"`
-	Question        string  `json:"question"`
-	Answer          string  `json:"answer"`
-	Status          string  `json:"status"`
-	Rounds          []Round `json:"rounds"`
-	StartedAt       string  `json:"started_at"`
-	EndedAt         string  `json:"ended_at"`
-	DurationSeconds float64 `json:"duration_seconds"`
+// Verdict is the canonical machine-readable run index written to
+// verdict.json at session end. Field order, JSON tags, and types gate the
+// v2 schema contract in docs/design/v2.md §6 (fitness functions F3/F7/F8/F12).
+// The bytes-exact snapshot test in verdict_test.go locks this shape.
+type Verdict struct {
+	Version         int               `json:"version"`
+	SessionID       string            `json:"session_id"`
+	SessionPath     string            `json:"session_path"`
+	Profile         string            `json:"profile"`
+	Question        string            `json:"question"`
+	Answer          string            `json:"answer"`
+	Status          string            `json:"status"`
+	Anonymization   map[string]string `json:"anonymization,omitempty"`
+	Rounds          []Round           `json:"rounds"`
+	Experts         []ExpertSummary   `json:"experts"`
+	Voting          *VerdictVoting    `json:"voting,omitempty"`
+	StartedAt       string            `json:"started_at"`
+	EndedAt         string            `json:"ended_at"`
+	DurationSeconds float64           `json:"duration_seconds"`
 }
 
-// Round captures one debate round. v1 always emits a single round at index 0;
-// v2 will append rounds 2..N.
+// Round captures one debate round's per-expert outcomes. v2 emits one Round
+// per debate round (blind R1, peer-aware R2). Experts slice is ordered
+// alphabetically by Label so rerun of the same session yields identical
+// bytes for identical expert outputs.
 type Round struct {
 	Experts []ExpertResult `json:"experts"`
-	Judge   JudgeResult    `json:"judge"`
 }
 
-// ExpertResult is the per-expert summary recorded in verdict.json. Status
-// values: "ok" | "failed" | "interrupted".
+// ExpertResult is the per-expert per-round record in verdict.json.rounds[].
+// Label carries the anonymized single-letter token (ADR-0008); RealName
+// is the profile's human-readable expert name; Participation is one of
+// "ok" | "carried" | "failed" (see rounds.RoundOutput for the state model).
 type ExpertResult struct {
-	Name            string  `json:"name"`
+	Label           string  `json:"label"`
+	RealName        string  `json:"real_name"`
+	Participation   string  `json:"participation"`
 	Executor        string  `json:"executor"`
 	Model           string  `json:"model"`
-	Status          string  `json:"status"`
 	ExitCode        int     `json:"exit_code"`
 	Retries         int     `json:"retries"`
 	DurationSeconds float64 `json:"duration_seconds"`
 }
 
-// JudgeResult is the judge stage summary. The judge has no Status field
-// because top-level VerdictV1.Status carries that signal: "ok" implies the
-// judge succeeded; "judge_failed" implies it did not.
-type JudgeResult struct {
-	Executor        string  `json:"executor"`
-	Model           string  `json:"model"`
-	ExitCode        int     `json:"exit_code"`
-	Retries         int     `json:"retries"`
-	DurationSeconds float64 `json:"duration_seconds"`
+// ExpertSummary is the top-level cross-round view of one expert.
+// ParticipationByRound[i] is the Participation value for rounds[i].
+// Length == len(Verdict.Rounds) — fitness F7 gates this invariant
+// (docs/design/v2.md §8 F7).
+type ExpertSummary struct {
+	Label                string   `json:"label"`
+	RealName             string   `json:"real_name"`
+	ParticipationByRound []string `json:"participation_by_round"`
+}
+
+// VerdictVoting is the voting-stage summary surfaced in verdict.json. Exactly
+// one of Winner (non-empty) or TiedCandidates (non-empty) is populated —
+// fitness F12 gates that XOR invariant (docs/design/v2.md §8 F12). Votes
+// carries one entry per active label (zero allowed for labels that
+// received no ballots).
+type VerdictVoting struct {
+	Votes          map[string]int  `json:"votes"`
+	Winner         string          `json:"winner,omitempty"`
+	TiedCandidates []string        `json:"tied_candidates,omitempty"`
+	Ballots        []VerdictBallot `json:"ballots"`
+}
+
+// VerdictBallot is one voter's entry in the voting summary. VotedFor is ""
+// when the ballot was discarded (subprocess failure, forgery, malformed
+// output, or vote for an inactive label).
+type VerdictBallot struct {
+	VoterLabel string `json:"voter_label"`
+	VotedFor   string `json:"voted_for"`
 }
 
 // writeSyncCloser is the subset of *os.File the verdict writer needs. Tests
@@ -86,7 +109,7 @@ var (
 // containing os.ErrExist and the operator must clear the stale file. We
 // prefer surfacing that over silently overwriting and masking a concurrency
 // bug.
-func (s *Session) WriteVerdict(v *VerdictV1) error {
+func (s *Session) WriteVerdict(v *Verdict) error {
 	buf, err := marshalVerdict(v)
 	if err != nil {
 		return fmt.Errorf("marshal verdict: %w", err)
@@ -122,7 +145,7 @@ func (s *Session) WriteVerdict(v *VerdictV1) error {
 // disabled. HTML escaping would mangle '<', '>', '&' inside question/answer
 // bodies — verdict.json is not consumed by browsers and we want the bytes to
 // match what the user wrote.
-func marshalVerdict(v *VerdictV1) ([]byte, error) {
+func marshalVerdict(v *Verdict) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# test/smoke/run.sh — execute the F1–F7 fitness functions.
+# test/smoke/run.sh — execute the v2 debate-engine fitness functions
+# (F1–F9, F12 plus the resume-after-SIGINT flow).
 #
 # Builds two binaries up front:
 #   ./council        (release; used by F1/F2 only when COUNCIL_LIVE_CLAUDE=1)
 #   ./council-test   (built with -tags testbinary; substitutes mock executors
-#                     for "claude-code" so F3–F7 do not need the real CLI)
+#                     for "claude-code" so F3–F12 do not need the real CLI)
 #
 # Then runs `go test -tags smoke ./test/smoke/...` and prints a per-F# summary
 # parsed from `go test -v` output. Exits 0 iff every smoke test passes; exits
@@ -53,7 +54,8 @@ echo "==> per-F# summary"
 #   "--- FAIL: TestF4_RetryRecorded (0.50s)"
 #   "--- SKIP: TestF1_LiveHappyPath (0.00s)"
 awk '
-  /^--- (PASS|FAIL|SKIP): TestF[0-9]+[a-z]?/ {
+  /^    --- (PASS|FAIL|SKIP):/ { next }  # subtest lines — roll up to parent
+  /^--- (PASS|FAIL|SKIP): TestF/ {
     status=$2; name=$3; dur=$4
     sub(/:$/, "", status)
     printf "  %-6s %-40s %s\n", status, name, dur
