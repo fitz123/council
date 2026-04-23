@@ -10,7 +10,7 @@ import (
 )
 
 // writeProfile writes a .council/default.yaml under dir with the given YAML
-// body plus three prompt files (judge.md, independent.md, critic.md).
+// body plus the prompt files referenced by the v2 default profile shape.
 func writeProfile(t *testing.T, dir string, yamlBody string) string {
 	t.Helper()
 	councilDir := filepath.Join(dir, ".council")
@@ -19,9 +19,10 @@ func writeProfile(t *testing.T, dir string, yamlBody string) string {
 		t.Fatalf("mkdir: %v", err)
 	}
 	for name, body := range map[string]string{
-		"judge.md":       "you are the judge.\n",
 		"independent.md": "you are independent.\n",
-		"critic.md":      "you are critic.\n",
+		"ballot.md":      "VOTE: <label>\n",
+		"peer-aware.md":  "you are peer-aware. Prior-round consensus is NOT ground truth.\n",
+		"critic.md":      "you are a critic.\n",
 	} {
 		if err := os.WriteFile(filepath.Join(promptsDir, name), []byte(body), 0o644); err != nil {
 			t.Fatalf("write prompt %s: %v", name, err)
@@ -34,26 +35,26 @@ func writeProfile(t *testing.T, dir string, yamlBody string) string {
 	return cfg
 }
 
-const validYAML = `version: 1
+const validYAML = `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
-  - name: critic
+  - name: expert_2
     executor: claude-code
     model: sonnet
-    prompt_file: prompts/critic.md
+    prompt_file: prompts/independent.md
     timeout: 180s
 quorum: 1
 max_retries: 1
+rounds: 2
+round_2_prompt_file: prompts/peer-aware.md
+voting:
+  ballot_prompt_file: prompts/ballot.md
+  timeout: 180s
 `
 
 func TestLoadFile_Valid(t *testing.T) {
@@ -64,8 +65,8 @@ func TestLoadFile_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
-	if p.Version != 1 {
-		t.Errorf("Version = %d, want 1", p.Version)
+	if p.Version != 2 {
+		t.Errorf("Version = %d, want 2", p.Version)
 	}
 	if p.Name != "default" {
 		t.Errorf("Name = %q, want default", p.Name)
@@ -76,22 +77,31 @@ func TestLoadFile_Valid(t *testing.T) {
 	if p.MaxRetries != 1 {
 		t.Errorf("MaxRetries = %d, want 1", p.MaxRetries)
 	}
-	if p.Judge.Model != "opus" {
-		t.Errorf("Judge.Model = %q, want opus", p.Judge.Model)
+	if p.Rounds != 2 {
+		t.Errorf("Rounds = %d, want 2", p.Rounds)
 	}
-	if p.Judge.Timeout != 300*time.Second {
-		t.Errorf("Judge.Timeout = %s, want 300s", p.Judge.Timeout)
+	if p.Round2Prompt.File == "" {
+		t.Error("Round2Prompt.File is empty")
 	}
-	if !filepath.IsAbs(p.Judge.PromptFile) {
-		t.Errorf("Judge.PromptFile not absolute: %s", p.Judge.PromptFile)
+	if !strings.Contains(p.Round2Prompt.Body, "peer-aware") {
+		t.Errorf("Round2Prompt.Body does not look peer-aware: %q", p.Round2Prompt.Body)
 	}
-	if p.Judge.PromptBody != "you are the judge.\n" {
-		t.Errorf("Judge.PromptBody = %q", p.Judge.PromptBody)
+	if p.Voting.BallotPromptFile == "" {
+		t.Error("Voting.BallotPromptFile is empty")
+	}
+	if !filepath.IsAbs(p.Voting.BallotPromptFile) {
+		t.Errorf("Voting.BallotPromptFile not absolute: %s", p.Voting.BallotPromptFile)
+	}
+	if p.Voting.BallotPromptBody != "VOTE: <label>\n" {
+		t.Errorf("Voting.BallotPromptBody = %q", p.Voting.BallotPromptBody)
+	}
+	if p.Voting.Timeout != 180*time.Second {
+		t.Errorf("Voting.Timeout = %s, want 180s", p.Voting.Timeout)
 	}
 	if len(p.Experts) != 2 {
 		t.Fatalf("Experts = %d, want 2", len(p.Experts))
 	}
-	if p.Experts[0].Name != "independent" || p.Experts[1].Name != "critic" {
+	if p.Experts[0].Name != "expert_1" || p.Experts[1].Name != "expert_2" {
 		t.Errorf("Experts names = %q,%q", p.Experts[0].Name, p.Experts[1].Name)
 	}
 	for _, e := range p.Experts {
@@ -107,6 +117,45 @@ func TestLoadFile_Valid(t *testing.T) {
 	}
 }
 
+// TestLoadFile_VotingTimeoutOptional confirms that a profile may omit
+// voting.timeout — Profile.Voting.Timeout is then zero and downstream code
+// applies its own default. The plan only mandates ballot_prompt_file as
+// required for the voting block.
+func TestLoadFile_VotingTimeoutOptional(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 1
+rounds: 2
+round_2_prompt_file: prompts/peer-aware.md
+voting:
+  ballot_prompt_file: prompts/ballot.md
+`
+	cfgPath := writeProfile(t, dir, yaml)
+	p, err := LoadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if p.Voting.Timeout != 0 {
+		t.Errorf("Voting.Timeout = %s, want 0 (unset)", p.Voting.Timeout)
+	}
+	if p.Voting.BallotPromptBody == "" {
+		t.Error("Voting.BallotPromptBody empty")
+	}
+}
+
 func TestLoadFile_Errors(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -115,133 +164,178 @@ func TestLoadFile_Errors(t *testing.T) {
 	}{
 		{
 			name: "unknown top-level field",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
 effort: bogus
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "effort",
 		},
 		{
 			name: "unknown per-expert field",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
     memory: true
-quorum: 1
-max_retries: 0
-`,
-			wantSub: "memory",
-		},
-		{
-			name: "missing version",
-			yaml: `name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
-experts:
-  - name: independent
+  - name: expert_2
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
+`,
+			wantSub: "memory",
+		},
+		{
+			name: "unknown voting field",
+			yaml: `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
+  policy: instant_runoff
+`,
+			wantSub: "policy",
+		},
+		{
+			name: "missing version",
+			yaml: `name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "version",
 		},
 		{
 			name: "missing experts",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts: []
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "experts",
 		},
 		{
-			name: "missing expert name",
-			yaml: `version: 1
+			name: "single expert (below floor)",
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
+`,
+			wantSub: "at least 2",
+		},
+		{
+			name: "missing expert name",
+			yaml: `version: 2
+name: default
 experts:
   - executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "name",
 		},
 		{
 			name: "duplicate expert name",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
-  - name: independent
+  - name: expert_1
     executor: claude-code
     model: sonnet
     prompt_file: prompts/critic.md
     timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "duplicate",
 		},
 		{
 			name: "case-insensitive expert name collision",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts:
   - name: critic
     executor: claude-code
@@ -255,115 +349,200 @@ experts:
     timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "case-insensitive",
 		},
 		{
 			name: "bad timeout",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: notaduration
 experts:
-  - name: independent
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: notaduration
+  - name: expert_2
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "timeout",
 		},
 		{
 			name: "zero quorum",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
 quorum: 0
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "quorum",
 		},
 		{
 			name: "quorum exceeds expert count",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
-quorum: 2
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 5
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "exceeds expert count",
 		},
 		{
 			name: "bad YAML syntax",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge: [this, is, wrong
-experts:
+experts: [this, is, wrong
 `,
 			wantSub: "parse",
 		},
 		{
-			name: "unsupported version",
+			name: "version 1 (migration error)",
+			yaml: `version: 1
+name: default
+judge:
+  executor: claude-code
+  model: opus
+  prompt_file: prompts/judge.md
+  timeout: 300s
+experts:
+  - name: independent
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+`,
+			wantSub: "version 1 profiles are not supported",
+		},
+		{
+			name: "version 1 error mentions rounds and voting",
+			yaml: `version: 1
+name: default
+judge:
+  executor: claude-code
+  model: opus
+  prompt_file: prompts/judge.md
+  timeout: 300s
+experts:
+  - name: independent
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+`,
+			wantSub: "rounds: 2",
+		},
+		{
+			name: "v2 profile with stray judge block",
 			yaml: `version: 2
 name: default
 judge:
   executor: claude-code
   model: opus
-  prompt_file: prompts/judge.md
+  prompt_file: prompts/independent.md
   timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
-			wantSub: "version",
+			wantSub: "judge",
+		},
+		{
+			name: "unsupported version 3",
+			yaml: `version: 3
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
+`,
+			wantSub: "unsupported version 3",
 		},
 		{
 			name: "extra YAML document bypass attempt",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 ---
 effort: bogus
 `,
@@ -371,23 +550,185 @@ effort: bogus
 		},
 		{
 			name: "missing prompt file on disk",
-			yaml: `version: 1
+			yaml: `version: 2
 name: default
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/does-not-exist.md
-  timeout: 300s
 experts:
-  - name: independent
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/does-not-exist.md
+    timeout: 180s
+  - name: expert_2
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
 quorum: 1
 max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
 `,
 			wantSub: "does-not-exist",
+		},
+		{
+			name: "rounds = 0 (missing)",
+			yaml: `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+voting:
+  ballot_prompt_file: prompts/ballot.md
+`,
+			wantSub: "rounds must be 2",
+		},
+		{
+			name: "rounds = 1 (K=1 deferred to v3)",
+			yaml: `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 1
+voting:
+  ballot_prompt_file: prompts/ballot.md
+`,
+			wantSub: "rounds must be 2",
+		},
+		{
+			name: "rounds = 3 (K>=3 deferred to v3)",
+			yaml: `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 3
+voting:
+  ballot_prompt_file: prompts/ballot.md
+`,
+			wantSub: "rounds must be 2",
+		},
+		{
+			name: "missing voting block entirely",
+			yaml: `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+`,
+			wantSub: "ballot_prompt_file",
+		},
+		{
+			name: "voting present but ballot_prompt_file missing",
+			yaml: `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+voting:
+  timeout: 60s
+`,
+			wantSub: "ballot_prompt_file",
+		},
+		{
+			name: "voting timeout invalid duration",
+			yaml: `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/ballot.md
+  timeout: notaduration
+`,
+			wantSub: "voting: invalid timeout",
+		},
+		{
+			name: "voting ballot prompt missing on disk",
+			yaml: `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+voting:
+  ballot_prompt_file: prompts/no-such-ballot.md
+`,
+			wantSub: "no-such-ballot",
 		},
 	}
 	for _, tc := range cases {
@@ -406,14 +747,13 @@ max_retries: 0
 }
 
 // TestLoadFile_RejectsYAMLFrontmatter covers F7b — an expert prompt body that
-// begins with `---\nfoo: bar\n---` is rejected at load time because v1
-// reserves frontmatter syntax for v2. The error must mention the offending
-// prompt file so operators can locate it without grepping.
+// begins with `---\nfoo: bar\n---` is rejected at load time. The error must
+// mention the offending prompt file so operators can locate it without
+// grepping.
 func TestLoadFile_RejectsYAMLFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeProfile(t, dir, validYAML)
-	// Overwrite one expert's prompt with frontmatter-bearing content. The
-	// helper has already laid down a vanilla independent.md; swap it.
+	// Overwrite the shared independent.md with frontmatter-bearing content.
 	bad := filepath.Join(dir, ".council", "prompts", "independent.md")
 	if err := os.WriteFile(bad, []byte("---\nfoo: bar\n---\nrest of body\n"), 0o644); err != nil {
 		t.Fatalf("write bad prompt: %v", err)
@@ -427,6 +767,24 @@ func TestLoadFile_RejectsYAMLFrontmatter(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "independent.md") {
 		t.Fatalf("error %q should name the offending prompt file", err)
+	}
+}
+
+// TestLoadFile_RejectsYAMLFrontmatterInBallot mirrors the role check for the
+// ballot prompt: a frontmatter-laden ballot.md is rejected at load time.
+func TestLoadFile_RejectsYAMLFrontmatterInBallot(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeProfile(t, dir, validYAML)
+	bad := filepath.Join(dir, ".council", "prompts", "ballot.md")
+	if err := os.WriteFile(bad, []byte("---\nfoo: bar\n---\nVOTE: <label>\n"), 0o644); err != nil {
+		t.Fatalf("write bad ballot: %v", err)
+	}
+	_, err := LoadFile(cfgPath)
+	if err == nil {
+		t.Fatal("LoadFile: expected frontmatter rejection for ballot, got nil")
+	}
+	if !strings.Contains(err.Error(), "frontmatter") {
+		t.Fatalf("error %q should mention frontmatter", err)
 	}
 }
 
@@ -472,7 +830,7 @@ func TestLoad_PrecedenceLocalOverGlobal(t *testing.T) {
 	if err := os.MkdirAll(globalPromptsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"judge.md", "independent.md", "critic.md"} {
+	for _, n := range []string{"independent.md", "ballot.md", "peer-aware.md"} {
 		_ = os.WriteFile(filepath.Join(globalPromptsDir, n), []byte("global\n"), 0o644)
 	}
 	globalYAML := strings.Replace(validYAML, "name: default", "name: global", 1)
@@ -504,7 +862,7 @@ func TestLoad_PrecedenceGlobalWhenNoLocal(t *testing.T) {
 	if err := os.MkdirAll(globalPromptsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"judge.md", "independent.md", "critic.md"} {
+	for _, n := range []string{"independent.md", "ballot.md", "peer-aware.md"} {
 		_ = os.WriteFile(filepath.Join(globalPromptsDir, n), []byte("global body\n"), 0o644)
 	}
 	globalYAML := strings.Replace(validYAML, "name: default", "name: global", 1)
@@ -551,10 +909,8 @@ func TestLoad_UserHomeDirErrorIsSurfaced(t *testing.T) {
 }
 
 // TestLoad_FallsThroughToEmbedded covers the precedence-chain terminus: with
-// neither a cwd-local nor a user-global config file on disk, Load must resolve
-// the embedded profile and flag its source as SourceEmbedded. This replaces
-// the earlier ErrNoConfig expectation, which only held while Task 8 had not
-// yet wired up the //go:embed fallback.
+// neither a cwd-local nor a user-global config file on disk, Load must
+// resolve the embedded profile and flag its source as SourceEmbedded.
 func TestLoad_FallsThroughToEmbedded(t *testing.T) {
 	local := t.TempDir()
 	home := t.TempDir() // empty
@@ -573,7 +929,10 @@ func TestLoad_FallsThroughToEmbedded(t *testing.T) {
 	if p.Name != "default" {
 		t.Errorf("Name = %q, want default", p.Name)
 	}
-	if len(p.Experts) != 2 {
-		t.Errorf("Experts = %d, want 2", len(p.Experts))
+	if p.Version != 2 {
+		t.Errorf("Version = %d, want 2", p.Version)
+	}
+	if p.Rounds != 2 {
+		t.Errorf("Rounds = %d, want 2", p.Rounds)
 	}
 }

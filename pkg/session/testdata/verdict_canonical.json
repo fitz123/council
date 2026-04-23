@@ -1,43 +1,135 @@
 {
-  "version": 1,
-  "session_id": "2026-04-19T17-02-14Z-fizzy-jingling-quokka",
-  "session_path": "./.council/sessions/2026-04-19T17-02-14Z-fizzy-jingling-quokka",
+  "version": 2,
+  "session_id": "2026-04-22T10-14-30Z-fizzy-jingling-quokka",
+  "session_path": "./.council/sessions/2026-04-22T10-14-30Z-fizzy-jingling-quokka",
   "profile": "default",
-  "question": "what is 2+2?",
-  "answer": "Four. (Sample synthesis.)",
+  "question": "Should we use Raft or Paxos for our cluster?",
+  "answer": "Raft is the answer.",
   "status": "ok",
+  "anonymization": {
+    "A": "curious-albatross",
+    "B": "devoted-bumblebee",
+    "C": "eager-capybara"
+  },
   "rounds": [
     {
       "experts": [
         {
-          "name": "independent",
+          "label": "A",
+          "real_name": "curious-albatross",
+          "participation": "ok",
           "executor": "claude-code",
           "model": "sonnet",
-          "status": "ok",
           "exit_code": 0,
           "retries": 0,
           "duration_seconds": 17.3
         },
         {
-          "name": "critic",
+          "label": "B",
+          "real_name": "devoted-bumblebee",
+          "participation": "ok",
           "executor": "claude-code",
           "model": "sonnet",
-          "status": "ok",
           "exit_code": 0,
           "retries": 0,
           "duration_seconds": 19.1
+        },
+        {
+          "label": "C",
+          "real_name": "eager-capybara",
+          "participation": "ok",
+          "executor": "claude-code",
+          "model": "sonnet",
+          "exit_code": 0,
+          "retries": 1,
+          "duration_seconds": 22.4
         }
-      ],
-      "judge": {
-        "executor": "claude-code",
-        "model": "opus",
-        "exit_code": 0,
-        "retries": 0,
-        "duration_seconds": 14.1
-      }
+      ]
+    },
+    {
+      "experts": [
+        {
+          "label": "A",
+          "real_name": "curious-albatross",
+          "participation": "ok",
+          "executor": "claude-code",
+          "model": "sonnet",
+          "exit_code": 0,
+          "retries": 0,
+          "duration_seconds": 15.2
+        },
+        {
+          "label": "B",
+          "real_name": "devoted-bumblebee",
+          "participation": "carried",
+          "executor": "claude-code",
+          "model": "sonnet",
+          "exit_code": 0,
+          "retries": 0,
+          "duration_seconds": 0
+        },
+        {
+          "label": "C",
+          "real_name": "eager-capybara",
+          "participation": "ok",
+          "executor": "claude-code",
+          "model": "sonnet",
+          "exit_code": 0,
+          "retries": 0,
+          "duration_seconds": 18.8
+        }
+      ]
     }
   ],
-  "started_at": "2026-04-19T17:02:14Z",
-  "ended_at": "2026-04-19T17:02:45Z",
-  "duration_seconds": 31.4
+  "experts": [
+    {
+      "label": "A",
+      "real_name": "curious-albatross",
+      "participation_by_round": [
+        "ok",
+        "ok"
+      ]
+    },
+    {
+      "label": "B",
+      "real_name": "devoted-bumblebee",
+      "participation_by_round": [
+        "ok",
+        "carried"
+      ]
+    },
+    {
+      "label": "C",
+      "real_name": "eager-capybara",
+      "participation_by_round": [
+        "ok",
+        "ok"
+      ]
+    }
+  ],
+  "voting": {
+    "votes": {
+      "A": 2,
+      "B": 0,
+      "C": 1
+    },
+    "winner": "A",
+    "ballots": [
+      {
+        "voter_label": "A",
+        "voted_for": "A"
+      },
+      {
+        "voter_label": "B",
+        "voted_for": "A"
+      },
+      {
+        "voter_label": "C",
+        "voted_for": "C"
+      }
+    ]
+  },
+  "started_at": "2026-04-22T10:14:30Z",
+  "ended_at": "2026-04-22T10:15:28Z",
+  "duration_seconds": 58.2
 }

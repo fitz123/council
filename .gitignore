@@ -11,6 +11,10 @@ vendor/
 # Session artifacts (if run from repo root)
 /.council/
 
+# Local tool state
+/.claude/
+/.ralphex/
+
 # Editor
 .idea/
 .vscode/

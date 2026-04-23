@@ -1,68 +1,60 @@
-// Package orchestrator is the Go-level glue that runs the council
-// pipeline: fan out expert subprocesses in parallel, check quorum, run
-// the judge, and write verdict.json atomically.
+// Package orchestrator wires the v2 debate pipeline end-to-end: session
+// setup (nonce, anonymization, question sanity scan), round 1 blind fan-out,
+// round 2 peer-aware fan-out, ballot stage, tally, output selection, and
+// atomic verdict emission. The actual subprocess work lives in pkg/debate;
+// this package owns the outer control flow — injection gating, quorum
+// escalation, interrupt handling, verdict assembly.
 //
-// It is deterministic Go code — no LLM is ever in the decision loop.
-// LLMs appear only as subprocesses behind the executor.Executor
-// interface; the orchestrator's control flow (retries, quorum, signal
-// handling, verdict assembly) is all policy owned by this package.
-//
-// Retry-ownership split (load-bearing — see docs/design/v1.md §10 and
-// pkg/runner's package doc):
-//
-//   - Rate-limit retries are RUNNER-OWNED. This package never counts or
-//     retries rate-limit failures — they are swallowed inside pkg/runner,
-//     and if one bubbles up here it means the runner's rate-limit budget
-//     was exhausted, which we treat as a terminal failure like any other.
-//   - Fail-retries (timeout, non-zero exit) are ORCHESTRATOR-OWNED, driven
-//     by profile.MaxRetries. The single shared path for retry + Execute
-//     is runWithFailRetry, used by both expert and judge goroutines
-//     (satisfies architect-review P2 — no per-role subprocess primitive
-//     duplication).
-//
-// Signal handling: the caller (cmd/council) owns SIGINT/SIGTERM and
-// cancels the root context. We respect ctx.Done() — goroutines return
-// quickly, and the verdict is still written atomically BEFORE Run
-// returns, so cmd/council can exit 130 with the verdict visible on disk.
+// Signal handling: the caller (cmd/council) owns SIGINT/SIGTERM and cancels
+// the root context. Run respects ctx.Done() between every stage, always
+// writes verdict.json before returning (status "interrupted"), and omits the
+// root-level .done marker on interrupted runs so `council resume` (D14) can
+// pick the session up later.
 package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/fitz123/council/pkg/config"
+	"github.com/fitz123/council/pkg/debate"
 	"github.com/fitz123/council/pkg/executor"
 	"github.com/fitz123/council/pkg/prompt"
-	"github.com/fitz123/council/pkg/runner"
 	"github.com/fitz123/council/pkg/session"
 )
 
-// Sentinel errors the orchestrator returns to cmd/council for exit-code
-// mapping. The verdict.json is always written before these are returned,
-// so callers can exit immediately on receiving them.
+// Sentinel errors mapped to exit codes by cmd/council. Verdict.json is
+// written to disk BEFORE any of these is returned, so the caller can exit
+// immediately on receipt.
 var (
-	ErrQuorumFailed = errors.New("orchestrator: quorum not met")
-	ErrJudgeFailed  = errors.New("orchestrator: judge failed after retry")
-	ErrInterrupted  = errors.New("orchestrator: interrupted")
+	// ErrInterrupted: root context cancelled mid-run. Verdict has
+	// status="interrupted"; no root .done marker is written so resume
+	// (D14) can pick up.
+	ErrInterrupted = errors.New("orchestrator: interrupted")
+
+	// ErrNoConsensus: voting ended in a tie (any N>=2 tied candidates).
+	// One output-<label>.md file per tied candidate lands in the session
+	// root. Maps to exit 2.
+	ErrNoConsensus = errors.New("orchestrator: no consensus")
+
+	// ErrInjectionInQuestion: operator-supplied question contained a
+	// fence-shaped line. No subprocesses are spawned. Verdict has
+	// status="injection_suspected_in_question". Maps to exit 1.
+	ErrInjectionInQuestion = errors.New("orchestrator: injection suspected in question")
 )
 
 // Validate checks that every executor name referenced by the profile is
-// registered. Called by cmd/council before Session.Create so a typo like
-// `executor: calude-code` fails fast with exit 1 (config error) instead
-// of materialising a session folder and surfacing as a runtime expert
-// failure (which could even pass quorum if another expert succeeds, or
-// show up as exit 3 "judge_failed" for the judge case).
+// registered. v2 retired the judge role (D15); only expert executors are
+// exercised here.
 func Validate(p *config.Profile) error {
 	var missing []string
-	if _, err := executor.Get(p.Judge.Executor); err != nil {
-		missing = append(missing, fmt.Sprintf("judge uses unknown executor %q", p.Judge.Executor))
-	}
 	for _, e := range p.Experts {
 		if _, err := executor.Get(e.Executor); err != nil {
 			missing = append(missing, fmt.Sprintf("expert %q uses unknown executor %q", e.Name, e.Executor))
@@ -75,314 +67,371 @@ func Validate(p *config.Profile) error {
 }
 
 // timestampLayout matches docs/design/v1.md §6 example
-// ("2026-04-19T17:02:14Z") — RFC3339 with colon-separated time (the
-// session-id timestamp uses dashes for filesystem-safety; this one does
-// not because verdict.json is a JSON string, not a path).
+// ("2026-04-19T17:02:14Z") — RFC3339 with colon-separated time.
 const timestampLayout = time.RFC3339
 
-// Run executes one council pipeline end-to-end. It always writes
-// verdict.json before returning — on success, on quorum failure, on
-// judge failure, and on interruption. The returned VerdictV1 is the same
-// one written to disk.
+// Run drives one debate session end-to-end. It always writes verdict.json
+// before returning: on ok, on quorum failure, on tie (no_consensus), on
+// injection rejection, and on interruption. The returned Verdict is the
+// same struct flushed to disk.
 //
-// The caller is expected to have already invoked session.Create to
-// materialize the session folder and the initial artifacts
-// (question.md, profile.snapshot.yaml, rounds/1/{experts,judge}/). Run
-// does not create the session folder itself because id/petname
-// allocation is not its concern.
-func Run(ctx context.Context, profile *config.Profile, question string, sess *session.Session) (*session.VerdictV1, error) {
+// The caller is expected to have already invoked session.Create (via
+// cmd/council.createSession) to materialise the session folder with the
+// nonce baked into profile.snapshot.yaml.
+func Run(ctx context.Context, profile *config.Profile, question string, sess *session.Session) (*session.Verdict, error) {
+	// On resume, an "interrupted" verdict.json from the previous attempt
+	// carries the original run's started_at. Preserve it so duration_seconds
+	// reflects total wall-clock from session creation to final resolution
+	// rather than just the final resume segment. Parse errors / absence fall
+	// back to time.Now() — the common case is a fresh run with no prior
+	// verdict.
 	startedAt := time.Now().UTC()
-	v := &session.VerdictV1{
-		Version:     1,
+	if prior, ok := readInterruptedStartedAt(sess.Path); ok {
+		startedAt = prior
+	}
+	v := &session.Verdict{
+		Version:     2,
 		SessionID:   sess.ID,
 		SessionPath: verdictSessionPath(sess.ID),
 		Profile:     profile.Name,
 		Question:    question,
 		StartedAt:   startedAt.Format(timestampLayout),
-		Rounds:      []session.Round{{}},
 	}
 
-	// Fan out experts in parallel. Each goroutine populates its slot in
-	// the results slice; ordering is preserved from profile.Experts so
-	// verdict.json lists experts in declaration order.
-	results := make([]*session.ExpertResult, len(profile.Experts))
-	outputs := make([]prompt.ExpertOutput, len(profile.Experts))
-	ok := make([]bool, len(profile.Experts))
-
-	var wg sync.WaitGroup
-	for i, ex := range profile.Experts {
-		wg.Add(1)
-		go func(i int, ex config.RoleConfig) {
-			defer wg.Done()
-			if ctx.Err() != nil {
-				// never-started: leave results[i] == nil so this expert
-				// is absent from verdict.json (design: "absent for
-				// never-started").
-				return
-			}
-			res, body, success := runExpert(ctx, profile, ex, question, sess)
-			results[i] = &res
-			if success {
-				outputs[i] = prompt.ExpertOutput{Name: ex.Name, Body: body}
-				ok[i] = true
-			}
-		}(i, ex)
-	}
-	wg.Wait()
-
-	// Collect expert results in declaration order, skipping never-started.
-	for _, r := range results {
-		if r != nil {
-			v.Rounds[0].Experts = append(v.Rounds[0].Experts, *r)
-		}
+	// Stage 1: sanity-scan the operator question for fence-shaped lines.
+	// A raw `=== EXPERT: ... ===` in the question would poison every
+	// downstream prompt, so we reject at the boundary with a dedicated
+	// status rather than letting the broken run complete.
+	if err := prompt.ScanQuestionForInjection(question); err != nil {
+		v.Status = "injection_suspected_in_question"
+		return finalizeAndWrite(v, sess, startedAt, fmt.Errorf("%w: %v", ErrInjectionInQuestion, err))
 	}
 
-	// Interrupt short-circuit: if context is done, skip quorum + judge
-	// and flush an "interrupted" verdict. Any expert that was in-flight
-	// has already had its status set to "interrupted" by runExpert; any
-	// never-started expert is absent from the slice.
+	// Stage 2: anonymization. The mapping is derived deterministically
+	// from sess.ID, so resume re-derives the same labels without needing
+	// a persisted copy.
+	experts := make([]debate.Expert, len(profile.Experts))
+	for i, e := range profile.Experts {
+		experts[i] = debate.Expert{Name: e.Name}
+	}
+	mapping, err := debate.AssignLabels(sess.ID, experts)
+	if err != nil {
+		v.Status = "config_error"
+		return finalizeAndWrite(v, sess, startedAt, err)
+	}
+	v.Anonymization = mapping
+
+	labeled := buildLabeled(profile.Experts, mapping)
+	rcfg := debate.RoundConfig{
+		Session:      sess,
+		Experts:      labeled,
+		Quorum:       profile.Quorum,
+		MaxRetries:   profile.MaxRetries,
+		Nonce:        sess.Nonce,
+		R2PromptBody: profile.Round2Prompt.Body,
+	}
+
+	// Stage 3: round 1 (blind fan-out).
+	r1, err := debate.RunRound1(ctx, rcfg, question)
+	v.Rounds = append(v.Rounds, buildRoundVerdict(r1, profile))
 	if ctx.Err() != nil {
-		v.Status = "interrupted"
-		finalize(v, startedAt)
-		if err := sess.WriteVerdict(v); err != nil {
-			return v, fmt.Errorf("write verdict: %w", err)
+		return finalizeInterrupted(v, sess, startedAt)
+	}
+	if err != nil {
+		if errors.Is(err, debate.ErrQuorumFailedR1) {
+			v.Status = "quorum_failed_round_1"
+			return finalizeAndWrite(v, sess, startedAt, err)
 		}
-		return v, ErrInterrupted
+		v.Status = "error"
+		return finalizeAndWrite(v, sess, startedAt, err)
 	}
 
-	// Quorum gate. Strict less-than — `survivors == quorum` passes.
-	var survivors []prompt.ExpertOutput
-	for i := range outputs {
-		if ok[i] {
-			survivors = append(survivors, outputs[i])
-		}
+	// Stage 4: round 2 (peer-aware, with carry-forward on per-expert fail).
+	r2, err := debate.RunRound2(ctx, rcfg, question, r1)
+	v.Rounds = append(v.Rounds, buildRoundVerdict(r2, profile))
+	if ctx.Err() != nil {
+		return finalizeInterrupted(v, sess, startedAt)
 	}
-	if len(survivors) < profile.Quorum {
-		v.Status = "quorum_failed"
-		finalize(v, startedAt)
-		if err := sess.WriteVerdict(v); err != nil {
-			return v, fmt.Errorf("write verdict: %w", err)
+	if err != nil {
+		if errors.Is(err, debate.ErrQuorumFailedR2) {
+			v.Status = "quorum_failed_round_2"
+			return finalizeAndWrite(v, sess, startedAt, err)
 		}
-		return v, ErrQuorumFailed
+		v.Status = "error"
+		return finalizeAndWrite(v, sess, startedAt, err)
 	}
 
-	// Judge. Runs sequentially — the judge prompt needs all expert
-	// outputs assembled before the call starts (see design §3).
-	judgeRes, answer, judgeOK := runJudge(ctx, profile, question, survivors, sess)
-	v.Rounds[0].Judge = judgeRes
-	if !judgeOK {
-		// Was this cancellation or failure? Distinguishing the two is what
-		// lets cmd/council choose exit 130 vs exit 3.
-		if ctx.Err() != nil {
-			v.Status = "interrupted"
-			finalize(v, startedAt)
-			if err := sess.WriteVerdict(v); err != nil {
-				return v, fmt.Errorf("write verdict: %w", err)
+	// Stage 5: ballot. Active cohort = R2 ok+carried.
+	aggregatePath := filepath.Join(sess.Path, "rounds", "2", "aggregate.md")
+	aggregateMD, rerr := os.ReadFile(aggregatePath)
+	if rerr != nil {
+		v.Status = "error"
+		return finalizeAndWrite(v, sess, startedAt, fmt.Errorf("read r2 aggregate: %w", rerr))
+	}
+	active, activeLabels := activeCohort(r2, labeled)
+
+	bcfg := debate.BallotConfig{
+		Session:    sess,
+		Experts:    active,
+		Nonce:      sess.Nonce,
+		BallotBody: profile.Voting.BallotPromptBody,
+		Timeout:    profile.Voting.Timeout,
+		MaxRetries: profile.MaxRetries,
+	}
+	ballots, err := debate.RunBallot(ctx, bcfg, question, string(aggregateMD))
+	if ctx.Err() != nil {
+		return finalizeInterrupted(v, sess, startedAt)
+	}
+	if err != nil {
+		v.Status = "error"
+		return finalizeAndWrite(v, sess, startedAt, err)
+	}
+
+	tally := debate.Tally(ballots, activeLabels)
+	if err := debate.SelectOutput(sess, tally, r2); err != nil {
+		v.Status = "error"
+		return finalizeAndWrite(v, sess, startedAt, err)
+	}
+	v.Voting = buildVotingVerdict(tally)
+
+	// Unique winner: copy winner's R2 body into v.Answer so cmd/council
+	// can print it to stdout.
+	if tally.Winner != "" {
+		for _, o := range r2 {
+			if o.Label == tally.Winner {
+				v.Answer = o.Body
+				break
 			}
-			return v, ErrInterrupted
 		}
-		v.Status = "judge_failed"
-		finalize(v, startedAt)
-		if err := sess.WriteVerdict(v); err != nil {
-			return v, fmt.Errorf("write verdict: %w", err)
-		}
-		return v, ErrJudgeFailed
+		v.Status = "ok"
+		return finalizeAndWrite(v, sess, startedAt, nil)
 	}
 
-	v.Answer = answer
-	v.Status = "ok"
-	finalize(v, startedAt)
-	if err := sess.WriteVerdict(v); err != nil {
-		return v, fmt.Errorf("write verdict: %w", err)
-	}
-	return v, nil
+	// Tie: status no_consensus, ErrNoConsensus so cmd/council exits 2.
+	v.Status = "no_consensus"
+	return finalizeAndWrite(v, sess, startedAt, ErrNoConsensus)
 }
 
-// finalize sets the end-timestamp and total-duration fields on v using
-// the same clock we captured at start. Called from every exit path (ok,
-// quorum_failed, judge_failed, interrupted) so verdict.json always has
-// meaningful started_at / ended_at / duration_seconds values.
-func finalize(v *session.VerdictV1, startedAt time.Time) {
+// finalizeAndWrite stamps the end-time, writes verdict.json, and drops the
+// root-level .done finality marker for every non-interrupted terminal path
+// (D14: the marker tells `council resume` that the session has reached a
+// final state). Only the interrupt path skips .done so resume can pick up
+// where SIGINT left off.
+func finalizeAndWrite(v *session.Verdict, sess *session.Session, startedAt time.Time, runErr error) (*session.Verdict, error) {
+	finalize(v, startedAt)
+	if werr := sess.WriteVerdict(v); werr != nil {
+		// errors.Join preserves both the I/O failure and the original
+		// sentinel (e.g. ErrNoConsensus, ErrQuorumFailedR1) so
+		// cmd/council's errors.Is switch still maps the exit code
+		// correctly when verdict.json write fails.
+		return v, errors.Join(fmt.Errorf("write verdict: %w", werr), runErr)
+	}
+	if derr := writeSessionDone(sess); derr != nil {
+		return v, errors.Join(fmt.Errorf("write session .done: %w", derr), runErr)
+	}
+	return v, runErr
+}
+
+// finalizeInterrupted flushes verdict.json with status="interrupted" and
+// returns ErrInterrupted. No root-level .done marker is written: `council
+// resume` (D14) uses .done absence as the "this session can still progress"
+// signal.
+func finalizeInterrupted(v *session.Verdict, sess *session.Session, startedAt time.Time) (*session.Verdict, error) {
+	v.Status = "interrupted"
+	finalize(v, startedAt)
+	if err := sess.WriteVerdict(v); err != nil {
+		// errors.Join preserves ErrInterrupted alongside the I/O failure
+		// so cmd/council's errors.Is switch still maps to exit 130 when
+		// verdict.json write fails on the SIGINT path.
+		return v, errors.Join(fmt.Errorf("write verdict: %w", err), ErrInterrupted)
+	}
+	return v, ErrInterrupted
+}
+
+// readInterruptedStartedAt recovers the original run's started_at from a
+// prior interrupted verdict.json in the session folder, used by resume to
+// preserve total wall-clock duration across the interrupt boundary. Only
+// verdicts with status="interrupted" are honoured — any other status means
+// the session is final (resume would refuse it) or the verdict is a prior
+// resume's own output being overwritten. Missing / unparseable / non-
+// interrupted verdicts return ok=false and the caller falls back to
+// time.Now(), preserving the fresh-run behaviour.
+func readInterruptedStartedAt(sessionPath string) (time.Time, bool) {
+	data, err := os.ReadFile(filepath.Join(sessionPath, "verdict.json"))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var v struct {
+		Status    string `json:"status"`
+		StartedAt string `json:"started_at"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return time.Time{}, false
+	}
+	if v.Status != "interrupted" || v.StartedAt == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(timestampLayout, v.StartedAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t.UTC(), true
+}
+
+// finalize sets the end-timestamp and duration fields on v using the clock
+// captured at Run start, and derives the top-level experts[] summary
+// (F7/F8 gate) from v.Rounds. Called from every terminal path so
+// verdict.json always carries meaningful started_at/ended_at/
+// duration_seconds values plus an experts array that matches rounds.
+func finalize(v *session.Verdict, startedAt time.Time) {
 	end := time.Now().UTC()
 	v.EndedAt = end.Format(timestampLayout)
 	v.DurationSeconds = end.Sub(startedAt).Seconds()
+	v.Experts = buildExpertsSummary(v)
+}
+
+// writeSessionDone writes the root-level .done marker that D14 defines as
+// the finality signal for `council resume`. Every non-interrupted terminal
+// path emits it (winner, tie, quorum failure, injection, config error);
+// only the interrupt path skips it so resume can still pick the session
+// up. The resume predicate also checks verdict.status as a defense-in-depth
+// signal against a missing/corrupted .done.
+func writeSessionDone(sess *session.Session) error {
+	donePath := filepath.Join(sess.Path, ".done")
+	f, err := os.OpenFile(donePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", donePath, err)
+	}
+	return f.Close()
+}
+
+// buildLabeled pairs each profile expert with its anonymized label, sorted
+// alphabetically by label so downstream iteration is deterministic.
+func buildLabeled(roles []config.RoleConfig, mapping map[string]string) []debate.LabeledExpert {
+	labeled := make([]debate.LabeledExpert, 0, len(roles))
+	for i := range roles {
+		label, ok := debate.LabelOf(roles[i].Name, mapping)
+		if !ok {
+			// AssignLabels covers every expert; this is unreachable.
+			continue
+		}
+		labeled = append(labeled, debate.LabeledExpert{Label: label, Role: roles[i]})
+	}
+	sort.Slice(labeled, func(i, j int) bool { return labeled[i].Label < labeled[j].Label })
+	return labeled
+}
+
+// buildRoundVerdict renders a slice of debate.RoundOutput into the
+// verdict.json Round shape, using the profile to backfill each role's
+// executor/model.
+func buildRoundVerdict(outputs []debate.RoundOutput, p *config.Profile) session.Round {
+	byName := make(map[string]config.RoleConfig, len(p.Experts))
+	for _, e := range p.Experts {
+		byName[e.Name] = e
+	}
+	experts := make([]session.ExpertResult, 0, len(outputs))
+	for _, o := range outputs {
+		role := byName[o.Name]
+		experts = append(experts, session.ExpertResult{
+			Label:           o.Label,
+			RealName:        o.Name,
+			Participation:   o.Participation,
+			Executor:        role.Executor,
+			Model:           role.Model,
+			ExitCode:        o.ExitCode,
+			Retries:         o.Retries,
+			DurationSeconds: o.DurationSeconds,
+		})
+	}
+	return session.Round{Experts: experts}
+}
+
+// buildExpertsSummary collapses v.Rounds into the top-level experts[]
+// summary that fitness F7 gates: one entry per distinct label, with
+// ParticipationByRound[i] mirroring Rounds[i].Experts[*].Participation for
+// that label. Output is ordered alphabetically by label so verdict bytes
+// are stable across runs with identical round data.
+//
+// Labels are drawn from v.Rounds (not v.Anonymization) so an abort before
+// round 1 produces an empty summary rather than a labels-without-rounds
+// inconsistency.
+func buildExpertsSummary(v *session.Verdict) []session.ExpertSummary {
+	type accum struct {
+		realName string
+		parts    []string
+	}
+	byLabel := make(map[string]*accum)
+	order := make([]string, 0)
+	for roundIdx, r := range v.Rounds {
+		for _, e := range r.Experts {
+			a, ok := byLabel[e.Label]
+			if !ok {
+				a = &accum{realName: e.RealName, parts: make([]string, len(v.Rounds))}
+				byLabel[e.Label] = a
+				order = append(order, e.Label)
+			}
+			a.parts[roundIdx] = e.Participation
+		}
+	}
+	sort.Strings(order)
+	out := make([]session.ExpertSummary, 0, len(order))
+	for _, label := range order {
+		a := byLabel[label]
+		out = append(out, session.ExpertSummary{
+			Label:                label,
+			RealName:             a.realName,
+			ParticipationByRound: a.parts,
+		})
+	}
+	return out
+}
+
+// buildVotingVerdict translates a debate.TallyResult into the verdict.json
+// Voting shape. Exactly one of Winner / TiedCandidates is populated; the
+// other is the zero value (preserved from tally).
+func buildVotingVerdict(t debate.TallyResult) *session.VerdictVoting {
+	ballots := make([]session.VerdictBallot, 0, len(t.Ballots))
+	for _, b := range t.Ballots {
+		ballots = append(ballots, session.VerdictBallot{
+			VoterLabel: b.VoterLabel,
+			VotedFor:   b.VotedFor,
+		})
+	}
+	return &session.VerdictVoting{
+		Votes:          t.Votes,
+		Winner:         t.Winner,
+		TiedCandidates: t.TiedCandidates,
+		Ballots:        ballots,
+	}
+}
+
+// activeCohort filters the labeled expert slice to those whose R2
+// participation was ok or carried (D3: carry-forward preserves voting
+// participation). Returned labels are alphabetical for stable tally
+// iteration.
+func activeCohort(r2 []debate.RoundOutput, labeled []debate.LabeledExpert) ([]debate.LabeledExpert, []string) {
+	byLabel := make(map[string]debate.LabeledExpert, len(labeled))
+	for _, le := range labeled {
+		byLabel[le.Label] = le
+	}
+	active := make([]debate.LabeledExpert, 0, len(r2))
+	labels := make([]string, 0, len(r2))
+	for _, o := range r2 {
+		if o.Participation != "ok" && o.Participation != "carried" {
+			continue
+		}
+		le, ok := byLabel[o.Label]
+		if !ok {
+			continue
+		}
+		active = append(active, le)
+		labels = append(labels, o.Label)
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].Label < active[j].Label })
+	sort.Strings(labels)
+	return active, labels
 }
 
 func verdictSessionPath(id string) string {
 	return "./" + filepath.ToSlash(filepath.Join(".council", "sessions", id))
-}
-
-// runExpert handles one expert's full lifecycle: mkdir its stage dir,
-// write prompt.md, invoke Executor.Execute via runWithFailRetry, read
-// stdout, touch .done on success. The returned body is empty on
-// failure/interrupt; the bool says whether the expert output should feed
-// into the judge prompt.
-//
-// Per-expert status semantics:
-//   - "ok"          — Execute succeeded, .done touched
-//   - "failed"      — Execute failed after all retries, stderr.log kept
-//   - "interrupted" — ctx cancelled mid-run, no .done, stderr.log kept
-func runExpert(ctx context.Context, profile *config.Profile, ex config.RoleConfig, question string, sess *session.Session) (session.ExpertResult, string, bool) {
-	dir := sess.ExpertDir(ex.Name)
-	base := session.ExpertResult{
-		Name:     ex.Name,
-		Executor: ex.Executor,
-		Model:    ex.Model,
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		base.Status = "failed"
-		return base, "", false
-	}
-
-	promptBody := prompt.BuildExpert(ex.PromptBody, question, nil)
-	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte(promptBody), 0o644); err != nil {
-		base.Status = "failed"
-		return base, "", false
-	}
-
-	req := executor.Request{
-		Prompt:     promptBody,
-		Model:      ex.Model,
-		Timeout:    ex.Timeout,
-		StdoutFile: filepath.Join(dir, "output.md"),
-		StderrFile: filepath.Join(dir, "stderr.log"),
-		MaxRetries: profile.MaxRetries,
-	}
-	resp, err, retries := runWithFailRetry(ctx, ex.Executor, profile.MaxRetries, req)
-
-	base.ExitCode = resp.ExitCode
-	base.Retries = retries
-	base.DurationSeconds = resp.Duration.Seconds()
-
-	if err != nil {
-		// Context cancellation is a distinct outcome from fail-after-retry:
-		// it maps to status "interrupted" so cmd/council can exit 130 and
-		// the verdict distinguishes "we ran out of time" from "the caller
-		// told us to stop".
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			base.Status = "interrupted"
-		} else {
-			base.Status = "failed"
-		}
-		return base, "", false
-	}
-
-	body, rerr := os.ReadFile(req.StdoutFile)
-	if rerr != nil {
-		base.Status = "failed"
-		return base, "", false
-	}
-	if err := sess.TouchDone(dir); err != nil {
-		base.Status = "failed"
-		return base, "", false
-	}
-	// Success — remove stderr file (design §7: persisted only on failure).
-	// runner.Run already does this on its own success path, but a stale
-	// file from a prior failed attempt that a retry later succeeded after
-	// would linger, so we clean up here too.
-	_ = os.Remove(req.StderrFile)
-	base.Status = "ok"
-	return base, string(body), true
-}
-
-// runJudge mirrors runExpert but for the single judge stage. It always
-// gets one retry on failure (per design §10: "Retry once. If retries
-// exhausted → exit 3"), independent of profile.MaxRetries which is an
-// expert-level knob.
-//
-// On success: writes synthesis.md, touches .done, returns the synthesis
-// body so the orchestrator can set VerdictV1.Answer. On failure: leaves
-// stderr.log behind, does NOT touch .done, and signals the orchestrator
-// to flip status to "judge_failed" / "interrupted".
-func runJudge(ctx context.Context, profile *config.Profile, question string, experts []prompt.ExpertOutput, sess *session.Session) (session.JudgeResult, string, bool) {
-	dir := sess.JudgeDir()
-	result := session.JudgeResult{
-		Executor: profile.Judge.Executor,
-		Model:    profile.Judge.Model,
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return result, "", false
-	}
-
-	promptBody := prompt.BuildJudge(profile.Judge.PromptBody, question, experts, nil)
-	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte(promptBody), 0o644); err != nil {
-		return result, "", false
-	}
-
-	req := executor.Request{
-		Prompt:     promptBody,
-		Model:      profile.Judge.Model,
-		Timeout:    profile.Judge.Timeout,
-		StdoutFile: filepath.Join(dir, "synthesis.md"),
-		StderrFile: filepath.Join(dir, "stderr.log"),
-		MaxRetries: profile.MaxRetries,
-	}
-	const judgeMaxRetries = 1
-	resp, err, retries := runWithFailRetry(ctx, profile.Judge.Executor, judgeMaxRetries, req)
-
-	result.ExitCode = resp.ExitCode
-	result.Retries = retries
-	result.DurationSeconds = resp.Duration.Seconds()
-
-	if err != nil {
-		return result, "", false
-	}
-	body, rerr := os.ReadFile(req.StdoutFile)
-	if rerr != nil {
-		return result, "", false
-	}
-	if err := sess.TouchDone(dir); err != nil {
-		return result, "", false
-	}
-	_ = os.Remove(req.StderrFile)
-	return result, string(body), true
-}
-
-// runWithFailRetry is the shared Execute-with-retry path used by every
-// subprocess call in this package (both expert and judge). Consolidating
-// retry logic here prevents drift between role-specific paths and gives
-// architect-review P2 a single grep-able call site.
-//
-// It retries up to maxRetries times on non-cancellation errors. Context
-// cancellation (or deadline) short-circuits — the caller handles that by
-// inspecting the returned error with errors.Is.
-//
-// The returned Response reflects the LAST attempt only (not a cumulative
-// sum across retries). verdict.json's per-role duration_seconds is
-// defined as the successful attempt's wall-clock; on failure it is the
-// final failed attempt's wall-clock. The int return is the number of
-// orchestrator-level retries — i.e., attempts beyond the first.
-func runWithFailRetry(ctx context.Context, execName string, maxRetries int, req executor.Request) (executor.Response, error, int) {
-	exec, err := executor.Get(execName)
-	if err != nil {
-		return executor.Response{}, err, 0
-	}
-	var lastResp executor.Response
-	for attempt := 0; ; attempt++ {
-		if cerr := ctx.Err(); cerr != nil {
-			if attempt == 0 {
-				return lastResp, cerr, 0
-			}
-			return lastResp, cerr, attempt - 1
-		}
-		resp, err := exec.Execute(ctx, req)
-		lastResp = resp
-		if err == nil {
-			return resp, nil, attempt
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return resp, err, attempt
-		}
-		// Rate-limit retries are runner-owned (see package doc). If
-		// ErrRateLimit bubbles up here the runner's budget was already
-		// spent; retrying at the orchestrator layer would stack a second
-		// budget on top of the first and is explicitly excluded by
-		// plan §Task 6 + design §10.
-		if errors.Is(err, runner.ErrRateLimit) {
-			return resp, err, attempt
-		}
-		if attempt >= maxRetries {
-			return resp, err, attempt
-		}
-	}
 }

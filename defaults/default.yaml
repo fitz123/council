@@ -1,23 +1,28 @@
-version: 1
+version: 2
 name: default
 
-judge:
-  executor: claude-code
-  model: opus
-  prompt_file: prompts/judge.md
-  timeout: 300s
-
 experts:
-  - name: independent
+  - name: expert_1
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
     timeout: 180s
-  - name: critic
+  - name: expert_2
     executor: claude-code
     model: sonnet
-    prompt_file: prompts/critic.md
+    prompt_file: prompts/independent.md
+    timeout: 180s
+  - name: expert_3
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
     timeout: 180s
 
 quorum: 1
 max_retries: 1
+rounds: 2
+round_2_prompt_file: prompts/peer-aware.md
+
+voting:
+  ballot_prompt_file: prompts/ballot.md
+  timeout: 180s

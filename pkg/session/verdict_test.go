@@ -11,32 +11,61 @@ import (
 	"testing"
 )
 
-// canonicalVerdict mirrors the example in docs/design/v1.md §6 byte-for-byte
-// once marshaled. Drift on any non-time/non-duration field breaks the schema
-// contract and fails this test (see TestVerdictV1_BytesExact below).
-func canonicalVerdict() *VerdictV1 {
-	return &VerdictV1{
-		Version:     1,
-		SessionID:   "2026-04-19T17-02-14Z-fizzy-jingling-quokka",
-		SessionPath: "./.council/sessions/2026-04-19T17-02-14Z-fizzy-jingling-quokka",
+// canonicalVerdict mirrors the v2 example embedded in
+// testdata/verdict_canonical.json byte-for-byte after marshaling. Drift on
+// any non-time/non-duration field breaks the schema contract and fails
+// TestVerdict_BytesExact below.
+//
+// Shape covers every fitness-gated field: anonymization map, per-round
+// per-expert {label, real_name, participation}, top-level experts with
+// participation_by_round, voting winner (xor tied_candidates), ballots.
+func canonicalVerdict() *Verdict {
+	return &Verdict{
+		Version:     2,
+		SessionID:   "2026-04-22T10-14-30Z-fizzy-jingling-quokka",
+		SessionPath: "./.council/sessions/2026-04-22T10-14-30Z-fizzy-jingling-quokka",
 		Profile:     "default",
-		Question:    "what is 2+2?",
-		Answer:      "Four. (Sample synthesis.)",
+		Question:    "Should we use Raft or Paxos for our cluster?",
+		Answer:      "Raft is the answer.",
 		Status:      "ok",
-		Rounds: []Round{{
-			Experts: []ExpertResult{
-				{Name: "independent", Executor: "claude-code", Model: "sonnet", Status: "ok", ExitCode: 0, Retries: 0, DurationSeconds: 17.3},
-				{Name: "critic", Executor: "claude-code", Model: "sonnet", Status: "ok", ExitCode: 0, Retries: 0, DurationSeconds: 19.1},
+		Anonymization: map[string]string{
+			"A": "curious-albatross",
+			"B": "devoted-bumblebee",
+			"C": "eager-capybara",
+		},
+		Rounds: []Round{
+			{Experts: []ExpertResult{
+				{Label: "A", RealName: "curious-albatross", Participation: "ok", Executor: "claude-code", Model: "sonnet", ExitCode: 0, Retries: 0, DurationSeconds: 17.3},
+				{Label: "B", RealName: "devoted-bumblebee", Participation: "ok", Executor: "claude-code", Model: "sonnet", ExitCode: 0, Retries: 0, DurationSeconds: 19.1},
+				{Label: "C", RealName: "eager-capybara", Participation: "ok", Executor: "claude-code", Model: "sonnet", ExitCode: 0, Retries: 1, DurationSeconds: 22.4},
+			}},
+			{Experts: []ExpertResult{
+				{Label: "A", RealName: "curious-albatross", Participation: "ok", Executor: "claude-code", Model: "sonnet", ExitCode: 0, Retries: 0, DurationSeconds: 15.2},
+				{Label: "B", RealName: "devoted-bumblebee", Participation: "carried", Executor: "claude-code", Model: "sonnet", ExitCode: 0, Retries: 0, DurationSeconds: 0},
+				{Label: "C", RealName: "eager-capybara", Participation: "ok", Executor: "claude-code", Model: "sonnet", ExitCode: 0, Retries: 0, DurationSeconds: 18.8},
+			}},
+		},
+		Experts: []ExpertSummary{
+			{Label: "A", RealName: "curious-albatross", ParticipationByRound: []string{"ok", "ok"}},
+			{Label: "B", RealName: "devoted-bumblebee", ParticipationByRound: []string{"ok", "carried"}},
+			{Label: "C", RealName: "eager-capybara", ParticipationByRound: []string{"ok", "ok"}},
+		},
+		Voting: &VerdictVoting{
+			Votes:  map[string]int{"A": 2, "B": 0, "C": 1},
+			Winner: "A",
+			Ballots: []VerdictBallot{
+				{VoterLabel: "A", VotedFor: "A"},
+				{VoterLabel: "B", VotedFor: "A"},
+				{VoterLabel: "C", VotedFor: "C"},
 			},
-			Judge: JudgeResult{Executor: "claude-code", Model: "opus", ExitCode: 0, Retries: 0, DurationSeconds: 14.1},
-		}},
-		StartedAt:       "2026-04-19T17:02:14Z",
-		EndedAt:         "2026-04-19T17:02:45Z",
-		DurationSeconds: 31.4,
+		},
+		StartedAt:       "2026-04-22T10:14:30Z",
+		EndedAt:         "2026-04-22T10:15:28Z",
+		DurationSeconds: 58.2,
 	}
 }
 
-func TestVerdictV1_BytesExact(t *testing.T) {
+func TestVerdict_BytesExact(t *testing.T) {
 	got, err := marshalVerdict(canonicalVerdict())
 	if err != nil {
 		t.Fatalf("marshalVerdict: %v", err)
@@ -47,6 +76,196 @@ func TestVerdictV1_BytesExact(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("verdict bytes drift from canonical fixture\n--- got\n%s\n--- want\n%s", got, want)
+	}
+}
+
+// TestVerdict_V2_Shape enforces the shape invariants from Task 9 / the
+// design doc §6:
+//   - version == 2
+//   - rounds[] present with per-round expert entries carrying
+//     {label, real_name, participation}
+//   - experts[] top-level summary present
+//   - voting.votes object present
+//   - exactly one of voting.winner / voting.tied_candidates populated
+//   - anonymization map populated
+//   - status is a v2-valid terminal value
+func TestVerdict_V2_Shape(t *testing.T) {
+	v := canonicalVerdict()
+	if v.Version != 2 {
+		t.Errorf("Version = %d, want 2", v.Version)
+	}
+	if len(v.Rounds) == 0 {
+		t.Fatal("Rounds must be non-empty")
+	}
+	for i, r := range v.Rounds {
+		if len(r.Experts) == 0 {
+			t.Errorf("Rounds[%d].Experts empty", i)
+		}
+		for j, e := range r.Experts {
+			if e.Label == "" {
+				t.Errorf("Rounds[%d].Experts[%d].Label empty", i, j)
+			}
+			if e.RealName == "" {
+				t.Errorf("Rounds[%d].Experts[%d].RealName empty", i, j)
+			}
+			if e.Participation == "" {
+				t.Errorf("Rounds[%d].Experts[%d].Participation empty", i, j)
+			}
+		}
+	}
+	if len(v.Experts) == 0 {
+		t.Fatal("Experts top-level summary empty")
+	}
+	if v.Voting == nil {
+		t.Fatal("Voting nil")
+	}
+	if v.Voting.Votes == nil {
+		t.Error("Voting.Votes nil")
+	}
+	if v.Anonymization == nil {
+		t.Error("Anonymization nil")
+	}
+	switch v.Status {
+	case "ok", "no_consensus", "quorum_failed_round_1", "quorum_failed_round_2",
+		"injection_suspected_in_question", "config_error", "interrupted", "error":
+	default:
+		t.Errorf("Status = %q, not a v2-valid terminal value", v.Status)
+	}
+}
+
+// TestVerdict_F7_ParticipationByRoundLength gates fitness F7
+// (docs/design/v2.md §8 F7): every top-level expert summary's
+// participation_by_round slice has length equal to len(rounds). The jq
+// probe is `.experts[].participation_by_round | length == (.rounds |
+// length)`. K-agnostic: the test runs over several {K, expert} shapes.
+func TestVerdict_F7_ParticipationByRoundLength(t *testing.T) {
+	cases := []struct {
+		name string
+		v    *Verdict
+	}{
+		{name: "canonical (K=2, N=3)", v: canonicalVerdict()},
+		{
+			name: "single round (K=1) with N=2 — defensive against future K=1 profile",
+			v: &Verdict{
+				Version: 2,
+				Rounds: []Round{
+					{Experts: []ExpertResult{
+						{Label: "A", RealName: "x", Participation: "ok"},
+						{Label: "B", RealName: "y", Participation: "failed"},
+					}},
+				},
+				Experts: []ExpertSummary{
+					{Label: "A", RealName: "x", ParticipationByRound: []string{"ok"}},
+					{Label: "B", RealName: "y", ParticipationByRound: []string{"failed"}},
+				},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := len(tc.v.Rounds)
+			for _, e := range tc.v.Experts {
+				if got := len(e.ParticipationByRound); got != want {
+					t.Errorf("expert %s: participation_by_round len = %d, want %d", e.Label, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestVerdict_F8_AnonymizationConsistency gates fitness F8
+// (docs/design/v2.md §8 F8): every (label, real_name) pair observed under
+// rounds[].experts[] resolves to the same real_name in the top-level
+// anonymization map. The jq probe is `anonymization as $m | [.rounds[]
+// .experts[] | {label, real_name}] | unique | all(. as $e | $m[$e.label]
+// == $e.real_name)`. We also check the top-level experts[] summary since
+// F7 requires consistent labels there.
+func TestVerdict_F8_AnonymizationConsistency(t *testing.T) {
+	v := canonicalVerdict()
+	if len(v.Anonymization) == 0 {
+		t.Fatal("canonical verdict missing anonymization map")
+	}
+	for i, r := range v.Rounds {
+		for j, e := range r.Experts {
+			got, ok := v.Anonymization[e.Label]
+			if !ok {
+				t.Errorf("rounds[%d].experts[%d] label %q not in anonymization", i, j, e.Label)
+				continue
+			}
+			if got != e.RealName {
+				t.Errorf("rounds[%d].experts[%d] label %q: real_name = %q, want %q",
+					i, j, e.Label, e.RealName, got)
+			}
+		}
+	}
+	for i, e := range v.Experts {
+		got, ok := v.Anonymization[e.Label]
+		if !ok {
+			t.Errorf("experts[%d] label %q not in anonymization", i, e.Label)
+			continue
+		}
+		if got != e.RealName {
+			t.Errorf("experts[%d] label %q: real_name = %q, want %q", i, e.Label, e.RealName, got)
+		}
+	}
+}
+
+// TestVerdict_F12_WinnerXorTied gates fitness F12 (docs/design/v2.md §8
+// F12): exactly one of voting.winner and voting.tied_candidates is
+// populated per run. `omitempty` on both struct fields produces a JSON
+// object where at most one key appears; a valid v2 run requires that
+// exactly one does.
+func TestVerdict_F12_WinnerXorTied(t *testing.T) {
+	cases := []struct {
+		name    string
+		voting  *VerdictVoting
+		wantErr bool
+	}{
+		{
+			name:   "winner only (canonical)",
+			voting: &VerdictVoting{Votes: map[string]int{"A": 2, "B": 1}, Winner: "A"},
+		},
+		{
+			name:   "tied only",
+			voting: &VerdictVoting{Votes: map[string]int{"A": 1, "B": 1, "C": 1}, TiedCandidates: []string{"A", "B", "C"}},
+		},
+		{
+			name:    "both populated — fitness violation",
+			voting:  &VerdictVoting{Votes: map[string]int{"A": 1}, Winner: "A", TiedCandidates: []string{"A", "B"}},
+			wantErr: true,
+		},
+		{
+			name:    "neither populated — fitness violation",
+			voting:  &VerdictVoting{Votes: map[string]int{"A": 0}},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			winnerSet := tc.voting.Winner != ""
+			tiedSet := len(tc.voting.TiedCandidates) > 0
+			exactlyOne := winnerSet != tiedSet
+			if exactlyOne == tc.wantErr {
+				t.Errorf("winner=%q tied=%v: exactlyOne=%v, want wantErr=%v",
+					tc.voting.Winner, tc.voting.TiedCandidates, exactlyOne, tc.wantErr)
+			}
+
+			b, err := json.Marshal(tc.voting)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var generic map[string]any
+			if err := json.Unmarshal(b, &generic); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			_, hasWinnerKey := generic["winner"]
+			_, hasTiedKey := generic["tied_candidates"]
+			if !tc.wantErr {
+				if hasWinnerKey == hasTiedKey {
+					t.Errorf("JSON: hasWinnerKey=%v hasTiedKey=%v — want exactly one", hasWinnerKey, hasTiedKey)
+				}
+			}
+		})
 	}
 }
 
@@ -121,7 +340,7 @@ func TestWriteVerdict_ConcurrentReader(t *testing.T) {
 			if err != nil {
 				continue // file may not exist yet — fine
 			}
-			var v VerdictV1
+			var v Verdict
 			if err := json.Unmarshal(b, &v); err != nil {
 				partial.Store(true)
 				return
@@ -288,15 +507,15 @@ func TestWriteVerdict_RenameError(t *testing.T) {
 	}
 }
 
-// TestVerdictV1_RoundTrip ensures the schema unmarshals back into an
+// TestVerdict_RoundTrip ensures the schema unmarshals back into an
 // equivalent struct. Catches breakage if a field tag drifts.
-func TestVerdictV1_RoundTrip(t *testing.T) {
+func TestVerdict_RoundTrip(t *testing.T) {
 	v := canonicalVerdict()
 	b, err := marshalVerdict(v)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var got VerdictV1
+	var got Verdict
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

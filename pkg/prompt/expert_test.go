@@ -50,24 +50,10 @@ func TestBuildExpert_Snapshot(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := BuildExpert(tc.role, tc.question, nil)
+			got := BuildExpert(tc.role, tc.question)
 			if got != tc.want {
 				t.Fatalf("BuildExpert mismatch\n--- got ---\n%q\n--- want ---\n%q", got, tc.want)
 			}
 		})
-	}
-}
-
-// TestBuildExpert_PriorRoundsNilVsEmpty pins the forward-compat contract: the
-// orchestrator may hand in nil OR an empty slice for priorRounds in v1, and
-// both must yield byte-identical output. If v2 changes this, update the plan
-// first.
-func TestBuildExpert_PriorRoundsNilVsEmpty(t *testing.T) {
-	role := "role body"
-	question := "q?"
-	gotNil := BuildExpert(role, question, nil)
-	gotEmpty := BuildExpert(role, question, []RoundOutput{})
-	if gotNil != gotEmpty {
-		t.Fatalf("nil vs empty priorRounds disagree:\nnil=%q\nempty=%q", gotNil, gotEmpty)
 	}
 }
