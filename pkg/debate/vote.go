@@ -19,10 +19,11 @@ import (
 
 // voteLineRE extracts a single-letter vote from a ballot subprocess's stdout.
 // The pattern requires a line-anchored `VOTE: <A-Z>` with no trailing content
-// on the same line. Anything else is treated as a malformed ballot and
-// discarded (D8): one stray character means the voter did not follow the
-// contract, so we refuse to guess its intent.
-var voteLineRE = regexp.MustCompile(`(?m)^VOTE: ([A-Z])$`)
+// on the same line, except for an optional `\r` to tolerate CRLF endings.
+// Anything else is treated as a malformed ballot and discarded (D8): one
+// stray character means the voter did not follow the contract, so we refuse
+// to guess its intent.
+var voteLineRE = regexp.MustCompile(`(?m)^VOTE: ([A-Z])\r?$`)
 
 // parseBallotVote returns the single voted-for label if body contains exactly
 // one `VOTE: <A-Z>` line. A ballot emitting zero or more than one VOTE line
