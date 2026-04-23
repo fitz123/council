@@ -177,11 +177,13 @@ func runExpertR1(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 
 	body, rerr := os.ReadFile(req.StdoutFile)
 	if rerr != nil {
-		// Post-subprocess local I/O failure. Treat as a permanent drop
-		// per D3 — without a .failed tombstone, resume would re-spawn
-		// this expert, potentially succeed, and land in a cohort whose
-		// R2 .done outputs were built without it. Guard with ctx.Err()
-		// so operator cancellation (SIGINT mid-read) stays resumable.
+		// Post-subprocess local I/O failure on the orchestrator host.
+		// Not a D3 after-retry expert failure — this is a FS problem.
+		// Tombstone anyway: the error is likely persistent (same disk,
+		// same perms on resume), and skipping .failed would let resume
+		// re-spawn this expert into a cohort whose R2 .done outputs
+		// were already built without it, violating cohort consistency.
+		// Guard with ctx.Err() so SIGINT mid-read stays resumable.
 		if ctx.Err() == nil {
 			_ = os.WriteFile(filepath.Join(dir, ".failed"), nil, 0o644)
 		}
@@ -197,8 +199,9 @@ func runExpertR1(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 	}
 	if err := cfg.Session.TouchDone(dir); err != nil {
 		// TouchDone failed after a clean subprocess + clean body. Same
-		// invariant as the ReadFile path: without .failed, resume would
-		// re-attempt and violate the permanent-drop rule.
+		// cohort-consistency rationale as the ReadFile path above:
+		// without .failed, resume would re-attempt this expert into an
+		// R2 cohort that already proceeded without it.
 		if ctx.Err() == nil {
 			_ = os.WriteFile(filepath.Join(dir, ".failed"), nil, 0o644)
 		}

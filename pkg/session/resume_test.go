@@ -71,6 +71,7 @@ func TestFindIncomplete_FinalVerdictStatusesSkipped(t *testing.T) {
 		"quorum_failed_round_2",
 		"injection_suspected_in_question",
 		"config_error",
+		"error",
 	}
 	for _, status := range statuses {
 		t.Run(status, func(t *testing.T) {

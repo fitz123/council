@@ -364,8 +364,8 @@ func cleanOutputs(s *session.Session) error {
 }
 
 // tallyJSON is the on-disk voting/tally.json shape. Must match the example
-// in docs/design/v2.md §3.8. TiedCandidates is serialized as null when unset
-// so the file always carries exactly-one-of-{winner, tied_candidates}.
+// in docs/design/v2.md §3.8. Winner is omitted on ties (`omitempty`);
+// TiedCandidates is always present and serialized as null on the winner path.
 type tallyJSON struct {
 	Votes          map[string]int `json:"votes"`
 	Winner         string         `json:"winner,omitempty"`
