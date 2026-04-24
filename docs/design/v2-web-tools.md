@@ -2,8 +2,8 @@
 
 > This supplement layers on top of `docs/design/v2.md`. It does not replace any
 > section. Edits to v2.md itself are applied in-place in the same PR. The
-> authoritative decisions live in `adr/0010-web-tools-for-experts.md` and
-> `adr/0011-amend-0008-nonce-every-fence.md`; this document is the
+> authoritative decisions live in `docs/adr/0010-web-tools-for-experts.md`
+> and `docs/adr/0011-amend-0008-nonce-every-fence.md`; this document is the
 > operational reference for readers who want the feature in one narrative.
 
 ## 1. What changes in v2
