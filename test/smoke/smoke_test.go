@@ -49,6 +49,12 @@ const envLive = "COUNCIL_LIVE_CLAUDE"
 // envMock selects which mock behavior the testbinary executor runs.
 const envMock = "COUNCIL_MOCK_EXECUTOR"
 
+// envMockCallLog tells the testbinary mock to spill every Execute call as
+// one JSON-lines record to the named file. F13/F17 read it across the
+// process boundary because the in-process RecordedCalls() log is not
+// reachable from the smoke layer.
+const envMockCallLog = "COUNCIL_MOCK_CALL_LOG"
+
 // testBinary returns the path to the testbinary build of council, or
 // fails the test if the env var is missing. Callers should run via
 // test/smoke/run.sh which guarantees both vars are set.
@@ -751,6 +757,166 @@ func TestF12_VoteOutcomeExactlyOne(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mockCall mirrors pkg/executor/mock.CallRecord for the JSON-lines
+// sidecar log. Decoded locally (rather than importing the mock package)
+// to keep test/smoke decoupled from the mock's internals — the contract
+// is the JSON shape on disk, not the Go struct.
+type mockCall struct {
+	StdoutFile     string   `json:"StdoutFile"`
+	AllowedTools   []string `json:"AllowedTools"`
+	PermissionMode string   `json:"PermissionMode"`
+}
+
+// readMockCallLog parses the JSON-lines file produced by the testbinary
+// mock when COUNCIL_MOCK_CALL_LOG is set. Returns calls in append order.
+// Fails the test if the file is missing — the smoke tests for F13/F17
+// always run with the env var set, so a missing log is a setup bug.
+func readMockCallLog(t *testing.T, path string) []mockCall {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read mock call log %q: %v", path, err)
+	}
+	out := make([]mockCall, 0)
+	for _, line := range strings.Split(strings.TrimRight(string(body), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var c mockCall
+		if err := json.Unmarshal([]byte(line), &c); err != nil {
+			t.Fatalf("decode mock call log line %q: %v", line, err)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// TestF13_ExpertsAlwaysHaveTools verifies the smoke-level invariant that
+// every R1 + R2 expert subprocess is spawned with the hardcoded ADR-0010
+// D17 allow-list (`WebSearch`, `WebFetch`) and `bypassPermissions` mode,
+// independent of profile config. Companion to the in-process unit
+// versions in pkg/debate (TestRunRound1_GrantsWebTools /
+// TestRunRound2_GrantsWebTools) — this one proves the wiring survives
+// the binary subprocess + executor registry path the operator actually
+// uses.
+//
+// The smoke layer cannot reach mock.RecordedCalls() across the process
+// boundary, so the testbinary mock is told to spill its call log to a
+// temp JSON-lines file via COUNCIL_MOCK_CALL_LOG.
+func TestF13_ExpertsAlwaysHaveTools(t *testing.T) {
+	bin := testBinary(t)
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, "calls.jsonl")
+	res := runCouncil(t, runOpts{
+		binary: bin,
+		args:   []string{"hello"},
+		env: map[string]string{
+			envMock:        "trivial",
+			envMockCallLog: logPath,
+		},
+		cwd:      cwd,
+		deadline: 30 * time.Second,
+	})
+	if res.exitCode != 0 {
+		t.Fatalf("F13: exit %d, want 0\nstderr:\n%s", res.exitCode, res.stderr)
+	}
+	calls := readMockCallLog(t, logPath)
+	expertCalls := 0
+	for _, c := range calls {
+		slash := filepath.ToSlash(c.StdoutFile)
+		if !strings.Contains(slash, "/rounds/") || !strings.Contains(slash, "/experts/") {
+			continue
+		}
+		expertCalls++
+		want := []string{"WebSearch", "WebFetch"}
+		if !stringSliceEqual(c.AllowedTools, want) {
+			t.Errorf("F13: expert call %s AllowedTools = %v, want %v",
+				slash, c.AllowedTools, want)
+		}
+		if c.PermissionMode != "bypassPermissions" {
+			t.Errorf("F13: expert call %s PermissionMode = %q, want %q",
+				slash, c.PermissionMode, "bypassPermissions")
+		}
+	}
+	if expertCalls == 0 {
+		t.Fatalf("F13: no expert calls in mock log %q\nlog:\n%s",
+			logPath, mustReadFile(t, logPath))
+	}
+}
+
+// TestF17_BallotsNeverHaveTools is the F13 negative twin: every ballot
+// subprocess (path under voting/votes/) must have AllowedTools nil and
+// PermissionMode empty — adjudication, not research. Hardcoded in
+// pkg/debate/vote.go, independent of the expert-spawn path.
+//
+// Same env-var-driven mock log as F13.
+func TestF17_BallotsNeverHaveTools(t *testing.T) {
+	bin := testBinary(t)
+	cwd := t.TempDir()
+	logPath := filepath.Join(cwd, "calls.jsonl")
+	res := runCouncil(t, runOpts{
+		binary: bin,
+		args:   []string{"hello"},
+		env: map[string]string{
+			envMock:        "trivial",
+			envMockCallLog: logPath,
+		},
+		cwd:      cwd,
+		deadline: 30 * time.Second,
+	})
+	if res.exitCode != 0 {
+		t.Fatalf("F17: exit %d, want 0\nstderr:\n%s", res.exitCode, res.stderr)
+	}
+	calls := readMockCallLog(t, logPath)
+	ballotCalls := 0
+	for _, c := range calls {
+		slash := filepath.ToSlash(c.StdoutFile)
+		if !strings.Contains(slash, "/voting/votes/") {
+			continue
+		}
+		ballotCalls++
+		if len(c.AllowedTools) != 0 {
+			t.Errorf("F17: ballot call %s AllowedTools = %v, want nil/empty",
+				slash, c.AllowedTools)
+		}
+		if c.PermissionMode != "" {
+			t.Errorf("F17: ballot call %s PermissionMode = %q, want empty",
+				slash, c.PermissionMode)
+		}
+	}
+	if ballotCalls == 0 {
+		t.Fatalf("F17: no ballot calls in mock log %q\nlog:\n%s",
+			logPath, mustReadFile(t, logPath))
+	}
+}
+
+// stringSliceEqual is a nil-tolerant equality check that does NOT
+// distinguish nil from empty — F13 cares about the values, not the
+// shape. (mock.go's recordCall normalizes empty→nil; F13 still asserts
+// the populated case.)
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// mustReadFile returns the file body or "<read error: …>" so failure
+// messages can include the log content without a second t.Fatalf.
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "<read error: " + err.Error() + ">"
+	}
+	return string(b)
 }
 
 // TestF_ResumeAfterSIGINT: drives the resume subcommand end-to-end. First

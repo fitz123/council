@@ -62,8 +62,8 @@ func TestLoadFromEmbedded_ProfileShape(t *testing.T) {
 		if p.Experts[i].Model != "sonnet" {
 			t.Errorf("Experts[%d].Model = %q, want sonnet", i, p.Experts[i].Model)
 		}
-		if p.Experts[i].Timeout != 180*time.Second {
-			t.Errorf("Experts[%d].Timeout = %s, want 180s", i, p.Experts[i].Timeout)
+		if p.Experts[i].Timeout != 300*time.Second {
+			t.Errorf("Experts[%d].Timeout = %s, want 300s", i, p.Experts[i].Timeout)
 		}
 		if !strings.Contains(p.Experts[i].PromptBody, "independent expert") {
 			t.Errorf("Experts[%d].PromptBody does not look like the independent prompt", i)

@@ -6,17 +6,17 @@ experts:
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
-    timeout: 180s
+    timeout: 300s
   - name: expert_2
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
-    timeout: 180s
+    timeout: 300s
   - name: expert_3
     executor: claude-code
     model: sonnet
     prompt_file: prompts/independent.md
-    timeout: 180s
+    timeout: 300s
 
 quorum: 1
 max_retries: 1

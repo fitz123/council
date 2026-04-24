@@ -95,6 +95,17 @@ func (c *ClaudeCode) Execute(ctx context.Context, req executor.Request) (executo
 		"--output-format", "text",
 	}
 
+	// ADR-0010 D17: emit --allowedTools / --permission-mode only when the
+	// caller opted in. Empty slice / empty string must produce zero argv
+	// delta so v1 callers and the ballot path (which hard-codes both to
+	// zero, ADR-0010 D19) keep exactly the v1 argv shape.
+	if len(req.AllowedTools) > 0 {
+		argv = append(argv, "--allowedTools", strings.Join(req.AllowedTools, ","))
+	}
+	if req.PermissionMode != "" {
+		argv = append(argv, "--permission-mode", req.PermissionMode)
+	}
+
 	// Inherit the parent environment so PATH, HOME, ANTHROPIC_API_KEY,
 	// etc. propagate, then append our token-budget knob. nil Env in
 	// pkg/runner means "inherit"; passing an explicit slice replaces, so

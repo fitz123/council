@@ -150,19 +150,25 @@ func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, quest
 		}
 	}
 
-	promptBody := buildBallotPrompt(cfg.BallotBody, question, aggregateMD)
+	promptBody := buildBallotPrompt(cfg.BallotBody, question, aggregateMD, cfg.Nonce)
 
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = ex.Role.Timeout
 	}
+	// Ballots are always tools-off per ADR-0010 D17 / F17: voting is an
+	// adjudication step, not a research step. Both fields are set to zero
+	// explicitly so a future change that threads non-zero defaults through
+	// BallotConfig cannot silently grant voters web access.
 	req := executor.Request{
-		Prompt:     promptBody,
-		Model:      ex.Role.Model,
-		Timeout:    timeout,
-		StdoutFile: stdoutPath,
-		StderrFile: stderrPath,
-		MaxRetries: cfg.MaxRetries,
+		Prompt:         promptBody,
+		Model:          ex.Role.Model,
+		Timeout:        timeout,
+		StdoutFile:     stdoutPath,
+		StderrFile:     stderrPath,
+		MaxRetries:     cfg.MaxRetries,
+		AllowedTools:   nil,
+		PermissionMode: "",
 	}
 	resp, err, retries := runWithFailRetry(ctx, ex.Role.Executor, cfg.MaxRetries, req)
 	result.ExitCode = resp.ExitCode
@@ -193,23 +199,30 @@ func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, quest
 
 // buildBallotPrompt assembles the ballot subprocess input. The layout mirrors
 // BuildExpert: instruction body first, then a fenced user question, then a
-// fenced CANDIDATES block holding the pre-built per-label aggregate. The
-// aggregate is already nonce-fenced per-label (pkg/debate.writeGlobalAggregate),
-// so we wrap the whole thing with plain `=== CANDIDATES ===` markers — those
-// top-level fences carry no nonce because they frame the aggregate, not an
-// LLM-sourced payload.
-func buildBallotPrompt(ballotBody, question, aggregateMD string) string {
+// fenced CANDIDATES block holding the pre-built per-label aggregate. Per
+// ADR-0011 every structural fence in the prompt protocol carries the session
+// nonce so the tightened forgery regex can reject forged `=== X ===` lines
+// that an attacker could otherwise synthesize without knowing the nonce.
+func buildBallotPrompt(ballotBody, question, aggregateMD, nonce string) string {
 	var b strings.Builder
-	b.Grow(len(ballotBody) + len(question) + len(aggregateMD) + 128)
+	b.Grow(len(ballotBody) + len(question) + len(aggregateMD) + len(nonce)*4 + 192)
 	b.WriteString(ballotBody)
-	b.WriteString("\n\n=== USER QUESTION (untrusted input) ===\n")
+	b.WriteString("\n\n=== USER QUESTION (untrusted input) [nonce-")
+	b.WriteString(nonce)
+	b.WriteString("] ===\n")
 	b.WriteString(question)
-	b.WriteString("\n=== END USER QUESTION ===\n\n=== CANDIDATES ===\n")
+	b.WriteString("\n=== END USER QUESTION [nonce-")
+	b.WriteString(nonce)
+	b.WriteString("] ===\n\n=== CANDIDATES [nonce-")
+	b.WriteString(nonce)
+	b.WriteString("] ===\n")
 	b.WriteString(aggregateMD)
 	if !strings.HasSuffix(aggregateMD, "\n") {
 		b.WriteString("\n")
 	}
-	b.WriteString("=== END CANDIDATES ===\n")
+	b.WriteString("=== END CANDIDATES [nonce-")
+	b.WriteString(nonce)
+	b.WriteString("] ===\n")
 	return b.String()
 }
 

@@ -40,13 +40,23 @@ type Executor interface {
 // MaxRetries is the profile's max_retries value, passed through so the
 // executor can size its rate-limit retry budget per design/v1.md §10's
 // `max_retries + 1` rule. Fail-retry policy stays orchestrator-owned.
+//
+// AllowedTools and PermissionMode are the ADR-0010 hooks the v2 debate
+// engine uses to grant experts WebSearch/WebFetch during R1 and R2.
+// Empty values preserve v1 behavior for any caller that does not set
+// them — no `--allowedTools` / `--permission-mode` flag is emitted by
+// the claude-code executor in that case. Ballot subprocesses
+// hard-code both fields to zero (`AllowedTools: nil`, `PermissionMode:
+// ""`) so voting is always tools-off regardless of expert defaults.
 type Request struct {
-	Prompt     string
-	Model      string
-	Timeout    time.Duration
-	StdoutFile string
-	StderrFile string
-	MaxRetries int
+	Prompt         string
+	Model          string
+	Timeout        time.Duration
+	StdoutFile     string
+	StderrFile     string
+	MaxRetries     int
+	AllowedTools   []string
+	PermissionMode string
 }
 
 // Response is what Execute returns on a non-error completion. ExitCode

@@ -398,6 +398,117 @@ func TestRunRound1_PromptFileWritten(t *testing.T) {
 	}
 }
 
+func TestRunRound1_GrantsWebTools(t *testing.T) {
+	// F13: every R1 expert subprocess must be spawned with the hardcoded
+	// ADR-0010 D17 allow-list (WebSearch + WebFetch) and the
+	// bypassPermissions mode. No profile gating — the values come from
+	// package-level constants in pkg/debate so a future profile field
+	// cannot accidentally downgrade the tools.
+	var (
+		mu      sync.Mutex
+		seen    = map[string]executor.Request{}
+	)
+	exec := &testExec{
+		name: testExecName,
+		fn: func(ctx context.Context, req executor.Request, _ int) (string, error) {
+			label := filepath.Base(filepath.Dir(req.StdoutFile))
+			mu.Lock()
+			seen[label] = req
+			mu.Unlock()
+			return "ok from " + label + "\n", nil
+		},
+	}
+	s, prof, labeled := setupRoundTest(t, "1313131313131313", exec)
+	_, err := RunRound1(context.Background(), RoundConfig{
+		Session:    s,
+		Experts:    labeled,
+		Quorum:     prof.Quorum,
+		MaxRetries: prof.MaxRetries,
+		Nonce:      s.Nonce,
+	}, "q")
+	if err != nil {
+		t.Fatalf("RunRound1: %v", err)
+	}
+	if len(seen) != len(labeled) {
+		t.Fatalf("captured %d spawns, want %d", len(seen), len(labeled))
+	}
+	wantTools := []string{"WebSearch", "WebFetch"}
+	for _, ex := range labeled {
+		req, ok := seen[ex.Label]
+		if !ok {
+			t.Fatalf("no spawn recorded for label %s", ex.Label)
+		}
+		if !equalStrSlice(req.AllowedTools, wantTools) {
+			t.Errorf("%s AllowedTools = %#v, want %#v", ex.Label, req.AllowedTools, wantTools)
+		}
+		if req.PermissionMode != "bypassPermissions" {
+			t.Errorf("%s PermissionMode = %q, want bypassPermissions", ex.Label, req.PermissionMode)
+		}
+	}
+}
+
+func TestRunRound2_GrantsWebTools(t *testing.T) {
+	// F13 R2 counterpart: every R2 spawn must carry the same hardcoded
+	// allow-list + permission mode as R1. Experts that failed R1 are not
+	// invoked in R2, so a drop there does not cancel this invariant — we
+	// assert on the experts that actually did run.
+	var (
+		mu   sync.Mutex
+		seen = map[string]executor.Request{}
+	)
+	exec := &testExec{
+		name: testExecName,
+		fn: func(ctx context.Context, req executor.Request, _ int) (string, error) {
+			label := filepath.Base(filepath.Dir(req.StdoutFile))
+			mu.Lock()
+			seen[label] = req
+			mu.Unlock()
+			return "r2 from " + label + "\n", nil
+		},
+	}
+	s, prof, labeled := setupRoundTest(t, "1414141414141414", exec)
+	r1 := r1For(labeled)
+	_, err := RunRound2(context.Background(), RoundConfig{
+		Session:      s,
+		Experts:      labeled,
+		Quorum:       prof.Quorum,
+		MaxRetries:   prof.MaxRetries,
+		Nonce:        s.Nonce,
+		R2PromptBody: testR2PromptBody,
+	}, "q", r1)
+	if err != nil {
+		t.Fatalf("RunRound2: %v", err)
+	}
+	if len(seen) != len(labeled) {
+		t.Fatalf("captured %d R2 spawns, want %d", len(seen), len(labeled))
+	}
+	wantTools := []string{"WebSearch", "WebFetch"}
+	for _, ex := range labeled {
+		req, ok := seen[ex.Label]
+		if !ok {
+			t.Fatalf("no R2 spawn recorded for label %s", ex.Label)
+		}
+		if !equalStrSlice(req.AllowedTools, wantTools) {
+			t.Errorf("%s R2 AllowedTools = %#v, want %#v", ex.Label, req.AllowedTools, wantTools)
+		}
+		if req.PermissionMode != "bypassPermissions" {
+			t.Errorf("%s R2 PermissionMode = %q, want bypassPermissions", ex.Label, req.PermissionMode)
+		}
+	}
+}
+
+func equalStrSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestRunRound1_NilSession(t *testing.T) {
 	_, err := RunRound1(context.Background(), RoundConfig{
 		Session:    nil,

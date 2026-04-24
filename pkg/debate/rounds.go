@@ -18,6 +18,33 @@ import (
 	"github.com/fitz123/council/pkg/session"
 )
 
+// defaultExpertTools is the hardcoded ADR-0010 D17 allow-list granted to
+// every R1 and R2 expert spawn. The values are constants here rather than
+// threaded through profile/config so there is exactly one source of truth
+// for "what tools does an expert get" inside pkg/debate; ballots explicitly
+// set AllowedTools=nil in vote.go so voting stays tools-off regardless of
+// this default (F17).
+//
+// Callers MUST use expertAllowedTools() instead of reading the package
+// slice directly: the Request type is a public executor contract and a
+// future executor implementation (Codex, Gemini, ...) may normalize or
+// dedupe req.AllowedTools in place. Without a per-request copy, that
+// mutation would race across sibling expert goroutines and could
+// permanently corrupt the shared default.
+var defaultExpertTools = []string{"WebSearch", "WebFetch"}
+
+// expertAllowedTools returns a fresh copy of defaultExpertTools. See the
+// comment on defaultExpertTools for the concurrency rationale.
+func expertAllowedTools() []string {
+	return append([]string(nil), defaultExpertTools...)
+}
+
+// defaultPermissionMode is the companion to defaultExpertTools. The claude-code
+// executor only emits `--permission-mode` when this field is non-empty, so the
+// `bypassPermissions` value is what actually lets the allow-listed tools run
+// without an interactive approval prompt inside the subprocess.
+const defaultPermissionMode = "bypassPermissions"
+
 // ErrQuorumFailedR1 is the sentinel returned by RunRound1 when the count of
 // surviving experts is below the profile's quorum. The orchestrator maps this
 // to verdict.status = "quorum_failed_round_1" and exit code 2. Outputs are
@@ -147,18 +174,20 @@ func runExpertR1(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 		return result
 	}
 
-	promptBody := prompt.BuildExpert(ex.Role.PromptBody, question)
+	promptBody := prompt.BuildExpert(ex.Role.PromptBody, question, cfg.Nonce)
 	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte(promptBody), 0o644); err != nil {
 		return result
 	}
 
 	req := executor.Request{
-		Prompt:     promptBody,
-		Model:      ex.Role.Model,
-		Timeout:    ex.Role.Timeout,
-		StdoutFile: filepath.Join(dir, "output.md"),
-		StderrFile: filepath.Join(dir, "stderr.log"),
-		MaxRetries: cfg.MaxRetries,
+		Prompt:         promptBody,
+		Model:          ex.Role.Model,
+		Timeout:        ex.Role.Timeout,
+		StdoutFile:     filepath.Join(dir, "output.md"),
+		StderrFile:     filepath.Join(dir, "stderr.log"),
+		MaxRetries:     cfg.MaxRetries,
+		AllowedTools:   expertAllowedTools(),
+		PermissionMode: defaultPermissionMode,
 	}
 	resp, err, retries := runWithFailRetry(ctx, ex.Role.Executor, cfg.MaxRetries, req)
 	result.ExitCode = resp.ExitCode
@@ -326,7 +355,7 @@ func runExpertR2(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 	// Design §3.4: R2 replaces the per-expert R1 role body with the
 	// profile-level peer-aware prompt so experts get the "treat peer outputs
 	// as UNTRUSTED / prior-round consensus is NOT ground truth" framing.
-	base := prompt.BuildExpert(cfg.R2PromptBody, question)
+	base := prompt.BuildExpert(cfg.R2PromptBody, question, cfg.Nonce)
 	promptBody := base
 	if peers != "" {
 		promptBody = base + "\n" + peers + "\n"
@@ -336,12 +365,14 @@ func runExpertR2(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 	}
 
 	req := executor.Request{
-		Prompt:     promptBody,
-		Model:      ex.Role.Model,
-		Timeout:    ex.Role.Timeout,
-		StdoutFile: filepath.Join(dir, "output.md"),
-		StderrFile: filepath.Join(dir, "stderr.log"),
-		MaxRetries: cfg.MaxRetries,
+		Prompt:         promptBody,
+		Model:          ex.Role.Model,
+		Timeout:        ex.Role.Timeout,
+		StdoutFile:     filepath.Join(dir, "output.md"),
+		StderrFile:     filepath.Join(dir, "stderr.log"),
+		MaxRetries:     cfg.MaxRetries,
+		AllowedTools:   expertAllowedTools(),
+		PermissionMode: defaultPermissionMode,
 	}
 	resp, err, retries := runWithFailRetry(ctx, ex.Role.Executor, cfg.MaxRetries, req)
 	result.ExitCode = resp.ExitCode
