@@ -4,6 +4,7 @@ package mock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,7 +13,14 @@ import (
 	"time"
 
 	"github.com/fitz123/council/pkg/executor"
+	"github.com/fitz123/council/pkg/prompt"
 )
+
+// decodeJSON unmarshals a single JSON line into v. Local helper for the
+// call-log tests so each test row reads with the same shape.
+func decodeJSON(s string, v any) error {
+	return json.Unmarshal([]byte(s), v)
+}
 
 // makeReq returns a Request whose Stdout/Stderr files live in t.TempDir,
 // so each subtest gets isolated paths. Timeout is generous; the slow
@@ -299,6 +307,15 @@ func TestMock_ForgeFenceR1(t *testing.T) {
 	if !strings.Contains(string(body), "=== EXPERT:") {
 		t.Fatalf("A R1 body %q should contain a forged fence", body)
 	}
+	// Close the loop: the point of the forgery mode is to exercise the
+	// reject path. If doForgeFenceR1 ever emits a shape the tightened
+	// regex no longer matches (as happened once pre-ADR-0011 with the
+	// 13-char "forged0000000" sentinel), F9 silently turns into a no-op.
+	// Verify prompt.CheckForgery actually rejects this body against a
+	// session nonce different from the forged literal.
+	if err := prompt.CheckForgery(string(body), "00000000000000ff"); !errors.Is(err, prompt.ErrForgedFence) {
+		t.Fatalf("A R1 body must trip ErrForgedFence; got %v\nbody: %q", err, body)
+	}
 
 	// Label B R1 path — should produce a clean trivial output.
 	r1b := filepath.Join(dir, "rounds", "1", "experts", "B")
@@ -320,6 +337,281 @@ func TestMock_ForgeFenceR1(t *testing.T) {
 	if strings.Contains(string(bodyB), "=== EXPERT:") {
 		t.Fatalf("B R1 body %q should not contain a fence", bodyB)
 	}
+}
+
+// TestMock_RecordsAllowedToolsAndPermissionMode verifies the package-level
+// Execute call log captures the per-call AllowedTools / PermissionMode
+// pair. F13 (experts always with WebSearch+WebFetch) and F17 (ballots
+// always tools-off) drive their assertions through RecordedCalls.
+//
+// Table-driven across the live (executor.Request, want CallRecord) shapes
+// the debate engine actually emits: nil/empty for ballots and v1, a full
+// list for v2 expert spawns, and a partial list to confirm we don't
+// short-circuit when only one of the fields is set.
+func TestMock_RecordsAllowedToolsAndPermissionMode(t *testing.T) {
+	withEnv(t, EnvName, "trivial")
+
+	cases := []struct {
+		name     string
+		req      executor.Request
+		wantTool []string
+		wantMode string
+	}{
+		{
+			name:     "v1_defaults_nil_and_empty",
+			req:      executor.Request{},
+			wantTool: nil,
+			wantMode: "",
+		},
+		{
+			name: "expert_spawn_full_tools_bypass_mode",
+			req: executor.Request{
+				AllowedTools:   []string{"WebSearch", "WebFetch"},
+				PermissionMode: "bypassPermissions",
+			},
+			wantTool: []string{"WebSearch", "WebFetch"},
+			wantMode: "bypassPermissions",
+		},
+		{
+			name: "single_tool_no_mode",
+			req: executor.Request{
+				AllowedTools: []string{"WebFetch"},
+			},
+			wantTool: []string{"WebFetch"},
+			wantMode: "",
+		},
+		{
+			name: "mode_only_no_tools",
+			req: executor.Request{
+				PermissionMode: "bypassPermissions",
+			},
+			wantTool: nil,
+			wantMode: "bypassPermissions",
+		},
+		{
+			name: "empty_slice_distinct_from_nil_records_as_nil",
+			req: executor.Request{
+				AllowedTools: []string{},
+			},
+			wantTool: nil,
+			wantMode: "",
+		},
+	}
+
+	m := &Mock{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetCallsForTest()
+			t.Cleanup(ResetCallsForTest)
+			req := tc.req
+			req.StdoutFile = filepath.Join(t.TempDir(), tc.name+"-stdout.md")
+			req.StderrFile = filepath.Join(t.TempDir(), tc.name+"-stderr.log")
+			if _, err := m.Execute(context.Background(), req); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			got := RecordedCalls()
+			if len(got) != 1 {
+				t.Fatalf("RecordedCalls len = %d, want 1", len(got))
+			}
+			rec := got[0]
+			if rec.StdoutFile != req.StdoutFile {
+				t.Errorf("StdoutFile = %q, want %q", rec.StdoutFile, req.StdoutFile)
+			}
+			if rec.PermissionMode != tc.wantMode {
+				t.Errorf("PermissionMode = %q, want %q", rec.PermissionMode, tc.wantMode)
+			}
+			if !slicesEqual(rec.AllowedTools, tc.wantTool) {
+				t.Errorf("AllowedTools = %v, want %v", rec.AllowedTools, tc.wantTool)
+			}
+		})
+	}
+}
+
+// TestMock_RecordedCalls_SnapshotIsCopy verifies the returned slice is
+// independent of the internal log: mutating the snapshot must not affect
+// later RecordedCalls() reads, and inner slices must be copies too so
+// tests can sort/edit without corrupting state for sibling assertions.
+func TestMock_RecordedCalls_SnapshotIsCopy(t *testing.T) {
+	withEnv(t, EnvName, "trivial")
+	ResetCallsForTest()
+	t.Cleanup(ResetCallsForTest)
+
+	req := makeReq(t, "snapshot")
+	req.AllowedTools = []string{"WebSearch", "WebFetch"}
+	m := &Mock{}
+	if _, err := m.Execute(context.Background(), req); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	snap := RecordedCalls()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len = %d, want 1", len(snap))
+	}
+	// Mutate the snapshot's inner slice — must not leak back to the log.
+	snap[0].AllowedTools[0] = "MUTATED"
+
+	again := RecordedCalls()
+	if again[0].AllowedTools[0] != "WebSearch" {
+		t.Fatalf("snapshot mutation leaked into recorder: got %q, want WebSearch", again[0].AllowedTools[0])
+	}
+}
+
+// TestMock_RecordedCalls_AppendOrder verifies calls are recorded in the
+// order they happen — F13/F17 assertions iterate the log to match
+// stage+label against expected tool sets per call.
+func TestMock_RecordedCalls_AppendOrder(t *testing.T) {
+	withEnv(t, EnvName, "trivial")
+	ResetCallsForTest()
+	t.Cleanup(ResetCallsForTest)
+
+	dir := t.TempDir()
+	m := &Mock{}
+	for _, name := range []string{"first", "second", "third"} {
+		req := executor.Request{
+			StdoutFile: filepath.Join(dir, name+".md"),
+			StderrFile: filepath.Join(dir, name+".log"),
+			Timeout:    time.Second,
+		}
+		if _, err := m.Execute(context.Background(), req); err != nil {
+			t.Fatalf("Execute %s: %v", name, err)
+		}
+	}
+	got := RecordedCalls()
+	if len(got) != 3 {
+		t.Fatalf("got %d calls, want 3", len(got))
+	}
+	for i, name := range []string{"first", "second", "third"} {
+		if !strings.HasSuffix(got[i].StdoutFile, name+".md") {
+			t.Errorf("calls[%d].StdoutFile = %q, want suffix %q", i, got[i].StdoutFile, name+".md")
+		}
+	}
+}
+
+// TestMock_CallLogFile_AppendsJSONLines verifies the COUNCIL_MOCK_CALL_LOG
+// sidecar: when set, each Execute appends one JSON object per line with
+// the same StdoutFile / AllowedTools / PermissionMode fields the
+// in-process recorder captures. Smoke tests that exec the testbinary
+// rely on this file because they cannot reach RecordedCalls() across
+// the process boundary.
+func TestMock_CallLogFile_AppendsJSONLines(t *testing.T) {
+	withEnv(t, EnvName, "trivial")
+	logPath := filepath.Join(t.TempDir(), "calls.jsonl")
+	withEnv(t, EnvCallLog, logPath)
+	t.Cleanup(ResetCallsForTest)
+	ResetCallsForTest()
+
+	dir := t.TempDir()
+	m := &Mock{}
+	cases := []struct {
+		name string
+		req  executor.Request
+	}{
+		{
+			name: "expert_full_tools",
+			req: executor.Request{
+				AllowedTools:   []string{"WebSearch", "WebFetch"},
+				PermissionMode: "bypassPermissions",
+			},
+		},
+		{
+			name: "ballot_no_tools",
+			req:  executor.Request{}, // ballot path drops AllowedTools/PermissionMode
+		},
+	}
+	for _, tc := range cases {
+		req := tc.req
+		req.StdoutFile = filepath.Join(dir, tc.name+".md")
+		req.StderrFile = filepath.Join(dir, tc.name+".log")
+		req.Timeout = time.Second
+		if _, err := m.Execute(context.Background(), req); err != nil {
+			t.Fatalf("Execute %s: %v", tc.name, err)
+		}
+	}
+
+	body, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	if len(lines) != len(cases) {
+		t.Fatalf("call log lines = %d, want %d\n%s", len(lines), len(cases), body)
+	}
+
+	for i, tc := range cases {
+		var got CallRecord
+		if err := decodeJSON(lines[i], &got); err != nil {
+			t.Fatalf("line %d decode: %v\n%s", i, err, lines[i])
+		}
+		wantSuffix := tc.name + ".md"
+		if !strings.HasSuffix(got.StdoutFile, wantSuffix) {
+			t.Errorf("line %d StdoutFile = %q, want suffix %q", i, got.StdoutFile, wantSuffix)
+		}
+		if !slicesEqual(got.AllowedTools, tc.req.AllowedTools) {
+			t.Errorf("line %d AllowedTools = %v, want %v", i, got.AllowedTools, tc.req.AllowedTools)
+		}
+		if got.PermissionMode != tc.req.PermissionMode {
+			t.Errorf("line %d PermissionMode = %q, want %q", i, got.PermissionMode, tc.req.PermissionMode)
+		}
+	}
+}
+
+// TestMock_CallLogFile_DisabledByDefault verifies that without the env
+// var set, recordCall does not create a log file — preserves v1
+// silent-mock behavior for tests that don't opt in.
+func TestMock_CallLogFile_DisabledByDefault(t *testing.T) {
+	withEnv(t, EnvName, "trivial")
+	withEnv(t, EnvCallLog, "")
+	t.Cleanup(ResetCallsForTest)
+	ResetCallsForTest()
+
+	logPath := filepath.Join(t.TempDir(), "should-not-exist.jsonl")
+	req := makeReq(t, "no-log")
+	m := &Mock{}
+	if _, err := m.Execute(context.Background(), req); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("call log %q should not exist (err=%v)", logPath, err)
+	}
+}
+
+// TestMock_RecordedCalls_ResetClearsLog ensures ResetCallsForTest
+// actually empties the package-level slice between table rows.
+func TestMock_RecordedCalls_ResetClearsLog(t *testing.T) {
+	withEnv(t, EnvName, "trivial")
+	ResetCallsForTest()
+	t.Cleanup(ResetCallsForTest)
+
+	req := makeReq(t, "reset")
+	m := &Mock{}
+	if _, err := m.Execute(context.Background(), req); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(RecordedCalls()) != 1 {
+		t.Fatalf("pre-reset len = %d, want 1", len(RecordedCalls()))
+	}
+	ResetCallsForTest()
+	if got := RecordedCalls(); len(got) != 0 {
+		t.Fatalf("post-reset len = %d, want 0", len(got))
+	}
+}
+
+// slicesEqual is a local nil-tolerant equality check so the tests can
+// distinguish nil from empty (we deliberately normalize empty→nil in
+// recordCall to match v1 behaviour).
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestMock_RegistersUnderClaudeCode(t *testing.T) {

@@ -211,6 +211,101 @@ func TestInitRegistersClaudeCode(t *testing.T) {
 	}
 }
 
+// TestExecuteEmitsToolFlagsConditionally locks in the ADR-0010 D17
+// flag shape: --allowedTools is a comma-joined CSV of tool names,
+// --permission-mode is the mode string, and BOTH flags are omitted
+// entirely when the corresponding Request field is empty. The empty-
+// field case is the v1-compatibility guarantee documented on
+// executor.Request — any caller that does not opt in sees zero argv
+// delta.
+func TestExecuteEmitsToolFlagsConditionally(t *testing.T) {
+	cases := []struct {
+		name           string
+		allowedTools   []string
+		permissionMode string
+		wantContains   []string
+		wantAbsent     []string
+	}{
+		{
+			name:           "empty preserves v1 argv",
+			allowedTools:   nil,
+			permissionMode: "",
+			wantContains:   []string{"-p - --model sonnet --output-format text"},
+			wantAbsent:     []string{"--allowedTools", "--permission-mode"},
+		},
+		{
+			name:           "both fields set emits both flags",
+			allowedTools:   []string{"WebSearch", "WebFetch"},
+			permissionMode: "bypassPermissions",
+			wantContains: []string{
+				"--allowedTools WebSearch,WebFetch",
+				"--permission-mode bypassPermissions",
+			},
+		},
+		{
+			name:           "single tool yields single-entry csv",
+			allowedTools:   []string{"WebFetch"},
+			permissionMode: "bypassPermissions",
+			wantContains: []string{
+				"--allowedTools WebFetch",
+				"--permission-mode bypassPermissions",
+			},
+			wantAbsent: []string{"WebSearch"},
+		},
+		{
+			name:           "allowedTools only (mode empty) emits only --allowedTools",
+			allowedTools:   []string{"WebSearch"},
+			permissionMode: "",
+			wantContains:   []string{"--allowedTools WebSearch"},
+			wantAbsent:     []string{"--permission-mode"},
+		},
+		{
+			name:           "permissionMode only (tools nil) emits only --permission-mode",
+			allowedTools:   nil,
+			permissionMode: "bypassPermissions",
+			wantContains:   []string{"--permission-mode bypassPermissions"},
+			wantAbsent:     []string{"--allowedTools"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := writeStub(t)
+			c := &ClaudeCode{Binary: stub}
+
+			tmp := t.TempDir()
+			out := filepath.Join(tmp, "out")
+			errf := filepath.Join(tmp, "err")
+
+			_, err := c.Execute(context.Background(), executor.Request{
+				Prompt:         "x",
+				Model:          "sonnet",
+				Timeout:        5 * time.Second,
+				StdoutFile:     out,
+				StderrFile:     errf,
+				AllowedTools:   tc.allowedTools,
+				PermissionMode: tc.permissionMode,
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			got, _ := os.ReadFile(out)
+			gotStr := string(got)
+			for _, sub := range tc.wantContains {
+				if !strings.Contains(gotStr, sub) {
+					t.Errorf("argv missing %q\ngot: %q", sub, gotStr)
+				}
+			}
+			for _, sub := range tc.wantAbsent {
+				if strings.Contains(gotStr, sub) {
+					t.Errorf("argv unexpectedly contains %q\ngot: %q", sub, gotStr)
+				}
+			}
+		})
+	}
+}
+
 func TestExecutePropagatesNonZeroExit(t *testing.T) {
 	// stub that exits non-zero — exercises the runner-error pass-through.
 	dir := t.TempDir()

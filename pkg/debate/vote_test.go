@@ -217,10 +217,22 @@ func TestRunBallot_FreshSubprocess_NoRoleBody(t *testing.T) {
 			return "VOTE: A\n", nil
 		},
 	}
-	cfg, _ := setupBallotTest(t, "cafebabedeadbeef", exec)
+	nonce := "cafebabedeadbeef"
+	cfg, _ := setupBallotTest(t, nonce, exec)
 	_, err := RunBallot(context.Background(), cfg, "q?", "aggregate body")
 	if err != nil {
 		t.Fatalf("RunBallot: %v", err)
+	}
+	// Per ADR-0011, every structural fence in the ballot prompt carries the
+	// session nonce so the tightened forgery regex
+	// (`^=== .*\[nonce-[0-9a-f]{16}\] ===[ \t\r]*$` in pkg/prompt/injection.go,
+	// landed in Task 3) can reject forged fences without over-rejecting
+	// benign web content.
+	wantFences := []string{
+		"=== USER QUESTION (untrusted input) [nonce-" + nonce + "] ===",
+		"=== END USER QUESTION [nonce-" + nonce + "] ===",
+		"=== CANDIDATES [nonce-" + nonce + "] ===",
+		"=== END CANDIDATES [nonce-" + nonce + "] ===",
 	}
 	for _, p := range capturedPrompts.List() {
 		for _, role := range []string{"you are alpha", "you are bravo", "you are charlie"} {
@@ -228,17 +240,51 @@ func TestRunBallot_FreshSubprocess_NoRoleBody(t *testing.T) {
 				t.Errorf("ballot prompt leaked role body %q:\n%s", role, p)
 			}
 		}
-		if !strings.Contains(p, "=== USER QUESTION") {
-			t.Errorf("ballot prompt missing USER QUESTION block:\n%s", p)
-		}
-		if !strings.Contains(p, "=== CANDIDATES ===") {
-			t.Errorf("ballot prompt missing CANDIDATES block:\n%s", p)
+		for _, fence := range wantFences {
+			if !strings.Contains(p, fence) {
+				t.Errorf("ballot prompt missing fence %q:\n%s", fence, p)
+			}
 		}
 		if !strings.Contains(p, "aggregate body") {
 			t.Errorf("ballot prompt missing aggregate content:\n%s", p)
 		}
 		if !strings.Contains(p, "VOTE: <label>") {
 			t.Errorf("ballot prompt missing VOTE instruction:\n%s", p)
+		}
+	}
+}
+
+// TestRunBallot_AlwaysToolsOff verifies every ballot subprocess is spawned
+// with executor.Request.AllowedTools == nil and PermissionMode == "" (F17).
+// Voting is hardcoded tools-off regardless of how R1/R2 expert spawns are
+// configured — adjudication, not research.
+func TestRunBallot_AlwaysToolsOff(t *testing.T) {
+	var mu sync.Mutex
+	var seen []executor.Request
+	exec := &testExec{
+		name: testExecName,
+		fn: func(ctx context.Context, req executor.Request, _ int) (string, error) {
+			mu.Lock()
+			seen = append(seen, req)
+			mu.Unlock()
+			return "VOTE: A\n", nil
+		},
+	}
+	cfg, labeled := setupBallotTest(t, "0123456789abcdef", exec)
+	if _, err := RunBallot(context.Background(), cfg, "q?", "agg"); err != nil {
+		t.Fatalf("RunBallot: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != len(labeled) {
+		t.Fatalf("captured %d ballot requests, want %d", len(seen), len(labeled))
+	}
+	for _, req := range seen {
+		if req.AllowedTools != nil {
+			t.Errorf("ballot %s: AllowedTools = %v, want nil (ballots always tools-off)", req.StdoutFile, req.AllowedTools)
+		}
+		if req.PermissionMode != "" {
+			t.Errorf("ballot %s: PermissionMode = %q, want \"\"", req.StdoutFile, req.PermissionMode)
 		}
 	}
 }

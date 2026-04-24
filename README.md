@@ -16,10 +16,20 @@ A single opinion from a single LLM is noisy. Running the same question through m
 
 - Two-round debate (`rounds: 2`): R1 is blind (each expert answers independently), R2 is peer-aware (each expert sees every other expert's R1 output, anonymized).
 - Anonymization: experts are relabeled `A, B, C, …` derived from the session ID so the cohort is rotated per run.
-- Per-session nonce + forgery detection on LLM outputs — a forged `=== EXPERT: … ===` fence in a subprocess's stdout is rejected (ADR-0008).
+- Per-session nonce + forgery detection on LLM outputs — every structural fence the orchestrator emits carries a `[nonce-<16hex>] ===` suffix, and any matching line in a subprocess's stdout is rejected (ADR-0008 as amended by ADR-0011). Benign markdown dividers like `=== Section ===` pass the scan.
 - Voting stage: every active expert casts a ballot on the R2 aggregate; winner's R2 body is printed verbatim. A tie surfaces `output-A.md`, `output-B.md`, … and exits 2 (`no_consensus`).
 - `council resume` subcommand: finish an interrupted session without re-running completed stages.
 - `verdict.json.version` bumps to `2`; shape documented in [`docs/design/v2.md`](docs/design/v2.md).
+
+## Web tools
+
+Experts always spawn with `WebSearch` and `WebFetch` available in both R1 and R2. Ballot subprocesses always run tools-off. There is no profile knob, no CLI flag, and no environment variable — the behaviour is hardcoded in the debate layer and translated to `--allowedTools` / `--permission-mode bypassPermissions` by the `claude-code` executor.
+
+- **Token cost:** expect **8–15×** the v1 token spend on research-heavy questions. General-knowledge questions with no fetch stay close to v1 cost.
+- **Latency:** plan for **3–5 min** per session wall-clock on research-heavy runs (per-expert `timeout: 300s` in the shipped profile).
+- **Audit:** the R1/R2 prompts instruct experts to cite URLs inline. Query with `grep -oE 'https?://[^ ]+' .council/sessions/<id>/rounds/*/experts/*/output.md`. `verdict.json` is unchanged — there is no structured per-fetch trail.
+
+See [ADR-0010](docs/adr/0010-web-tools-for-experts.md), [ADR-0011](docs/adr/0011-amend-0008-nonce-every-fence.md), and [`docs/design/v2-web-tools.md`](docs/design/v2-web-tools.md) for the full rationale.
 
 ## Install
 
@@ -157,8 +167,9 @@ A `council gc` subcommand is on the roadmap.
 ## Design
 
 - [`docs/design/v2.md`](docs/design/v2.md) — current debate-engine spec.
+- [`docs/design/v2-web-tools.md`](docs/design/v2-web-tools.md) — web-tools supplement (R1/R2 tools, token + latency envelope, audit recipe).
 - [`docs/design/v1.md`](docs/design/v1.md) — MVP spec (superseded by v2 for the run loop; still useful for file-artifact and CLI-shape invariants).
-- [`docs/adr/`](docs/adr/) — architectural decision records (0008 is the v2 debate-rounds ADR).
+- [`docs/adr/`](docs/adr/) — architectural decision records (0008 for debate rounds + injection, 0010 for expert web tools, 0011 for nonce-every-fence).
 - [`docs/architect-review.md`](docs/architect-review.md) — systems-architect methodology review of the spec.
 
 ## License

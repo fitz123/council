@@ -111,3 +111,13 @@ At N=3 × K=2 in parallel, expect **3–5 minutes** of total wall time for a typ
 - **Timeouts.** Shipped `default.yaml` ships with 300s per expert. Raise further if your typical questions need many fetches.
 - **Audit trail.** Inline URL citations appear in `rounds/*/experts/*/output.md` via R1/R2 prompt discipline. Query with `grep -oE 'https?://[^ ]+' rounds/*/experts/*/output.md`. No structured `web_fetches` field in `verdict.json`.
 - **Ballots are always tools-off.** Hardcoded separately from expert spawn, enforced in `pkg/debate/vote.go`.
+
+## 7. Smoke coverage and gating
+
+Two scripts live under `test/smoke/`:
+
+- **`test/smoke/run.sh`** — the default smoke suite (F1–F12 plus F13/F17). All v2-web-tools assertions land here as Go-level fitness functions. F13 (experts always have `WebSearch` + `WebFetch` + `bypassPermissions`) and F17 (ballots always tools-off) drive their assertions through the testbinary mock executor's per-call JSON-lines log, written when `COUNCIL_MOCK_CALL_LOG` is set. The mock log is the smoke-layer counterpart to `pkg/executor/mock.RecordedCalls()` (in-process tests in `pkg/debate` use the in-process recorder; smoke tests, which exec the binary, read the file). Run on every change; no external deps.
+
+- **`test/smoke/run-web-tools.sh`** — gated live-Claude smoke. Requires `COUNCIL_LIVE_CLAUDE=1` AND a working `claude` CLI on PATH. Builds the release binary, runs a real one-shot debate ("What is the latest stable Go version? Cite the URL where you found it."), and asserts the winner's `output.md` contains at least one `https?://` citation — proving the prompt discipline (R1/R2 cite-URLs requirement) and the executor wiring (`--allowedTools WebSearch,WebFetch --permission-mode bypassPermissions`) reach all the way into a real subprocess. Skipped silently (exit 0) if the env gate is unset, so it is safe to wire into any CI lane that may or may not have the CLI.
+
+Operator note: the live smoke costs real tokens and takes 3–5 minutes per run (per §5), so it is not part of the default suite — opt in only when the wiring or prompt discipline has been touched.
