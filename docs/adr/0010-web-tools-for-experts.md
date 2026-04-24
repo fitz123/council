@@ -19,15 +19,15 @@ This ADR records the decision to add web tools, the scope, and what it costs.
 
 ## Decision
 
-Add a profile-level `tools` field to v2 configs that enables `WebSearch` and `WebFetch` for experts. Ship `default.yaml` with both enabled. Augment the existing R1 (`defaults/prompts/independent.md`) and R2 (`defaults/prompts/peer-aware.md`) prompts — already round-specific per the repo's current `round_2_prompt_file` mechanism — with research and verification discipline. Tighten the D11 forgery regex (amended in companion ADR-0011, which also nonce-tags every structural fence in the protocol).
+Experts always run with `WebSearch` and `WebFetch` available. This is hardcoded in the `claudecode` executor — no profile flag, no CLI kill-switch, no operator toggle. Augment the existing R1 (`defaults/prompts/independent.md`) and R2 (`defaults/prompts/peer-aware.md`) prompts — already round-specific per the repo's `round_2_prompt_file` mechanism — with research and verification discipline. Tighten the D11 forgery regex (amended in companion ADR-0011, which also nonce-tags every structural fence in the protocol).
 
 **Scope covered:**
 
-- Tools enabled for both R1 and R2.
-- Profile-level flag, **not per-expert** — all experts in a profile get the same tool surface. Per-expert asymmetry deferred to v3.
-- Ballot subprocesses always run **tools-off** (hardcoded, not operator-configurable — YAGNI; the ballot prompt has nothing to fetch).
-- Tools *available*, not *required*. Prompts encourage verification when facts matter; they do not mandate tool use on every question.
+- Tools always-on for both R1 and R2. No profile field, no CLI flag, no environment variable.
+- Ballot subprocesses always run **tools-off** (hardcoded internally — the ballot prompt has nothing to fetch, and cross-round audit confirms the vote subprocess must not produce tool-use events that could confuse tally extraction).
+- Tools *available*, not *mandated*. Prompts encourage verification when facts matter; they do not force a tool call on trivial questions.
 - R1 and R2 prompts updated in place (augmented, not renamed). The existing profile `round_2_prompt_file` field stays — no schema migration.
+- No structured per-fetch audit in `verdict.json`. Inline URL citations in `output.md` (via R1/R2 prompt discipline) are the audit surface; `grep -oE 'https?://[^ ]+' rounds/*/experts/*/output.md` is the query. If this ever hits a ceiling, revisit — don't pay the cost speculatively.
 
 **Explicitly deferred to v3:**
 
@@ -38,35 +38,21 @@ Add a profile-level `tools` field to v2 configs that enables `WebSearch` and `We
 - MCP servers beyond WebSearch/WebFetch.
 - Heterogeneous models per expert.
 - Per-expert tool asymmetry (researcher vs. skeptic roles).
-- Structured `verdict.json.experts[].web_fetches` audit trail — see D21; feasible via `--output-format stream-json` (smoke-verified) but out of scope for v2 because it would flip the executor's stdout-reading contract. Revisit for v2.1.
+- Structured audit trail (`verdict.json.experts[].web_fetches`) — see D21.
 
 ## Design
 
-### D17 — Profile-level `tools` field
+### D17 — Tools always-on for experts (no config surface)
 
-New top-level profile field:
+The `claudecode` executor, when called on behalf of an expert, always appends `--allowedTools WebSearch,WebFetch --permission-mode bypassPermissions` to the argv. There is no profile `tools:` block, no `--no-tools` CLI flag, no environment variable. One behaviour, hardcoded.
 
-```yaml
-version: 2
-name: default
-tools:
-  web_search: true
-  web_fetch: true
-experts: [ ... ]
-rounds: 2
-round_2_prompt_file: prompts/peer-aware.md
-...
-```
+**Why no knob:** every operator-visible config surface is a maintenance and review cost. We are one user on one project; the question "would I ever want tools off?" has two honest answers — (a) "for deterministic replay of an old session" (already handled by session-folder-as-database: replay happens against the binary that produced the session, and profile snapshots freeze the prompt/model but do not try to freeze the live web), and (b) "for cheaper priors-only runs" (speculative; not a real workflow today). Neither justifies the config surface. If either becomes real, a flag is a cheap additive change.
 
-Defaults in shipped `default.yaml`: both `true`. The validator rejects the field on `version: 1` configs.
+**Why ballots still off:** a separate internal rule, not an operator choice. The ballot subprocess is a one-line `VOTE: <label>` contract; tool calls there would produce output that could corrupt tally extraction. Enforced in `pkg/debate/vote.go` by passing `AllowedTools: nil` regardless of anything upstream.
 
-Passed into every expert's `executor.Request` as an `AllowedTools []string` field. The `claudecode` executor translates the list into `--allowedTools WebSearch,WebFetch`.
+**On `--permission-mode bypassPermissions`:** smoke-verified **not strictly required** in default installations — `claude -p --allowedTools WebSearch,WebFetch` works as-is, 15s single-fetch round-trip (smoke 5). Set anyway as belt-and-braces against installations with restrictive default permission config (custom `settings.json`, corporate policy) where an unapproved tool-use request in non-interactive `-p` mode has no way to prompt and would stall until timeout. Cost is one extra argv token.
 
-**On `--permission-mode bypassPermissions`:** smoke-verified **not strictly required** in default installations — `claude -p --allowedTools WebSearch,WebFetch` works as-is, 15s single-fetch round-trip (smoke 5). Set it anyway as a belt-and-braces against operator configurations that restrict default permission behavior (custom `settings.json`, corporate policy) where an unapproved tool-use request in non-interactive `-p` mode has no way to prompt and would stall until timeout. Cost is one extra argv token; benefit is deterministic tool availability across installations.
-
-If `AllowedTools` is empty, the executor emits neither flag — v1 behavior preserved for any v1 profile loaded against a v2 binary.
-
-Snapshot written into `profile.snapshot.yaml` per v1.md §5 so resume (D14) reproduces the tool surface deterministically.
+**Effect on the `executor.Request` contract:** `AllowedTools []string` and `PermissionMode string` are added to `Request` as additive fields. The claudecode adapter sets them for expert spawns, leaves them empty for ballot spawns. An empty `AllowedTools` produces no `--allowedTools` flag (unchanged v1 behaviour) so any test that hits the executor with a bare Request keeps working.
 
 ### D18 — Round-specific prompt content (existing schema unchanged)
 
@@ -85,36 +71,31 @@ R2 experts may re-fetch URLs R1 experts already fetched. This costs tokens and l
 
 Consequence: page content may drift between R1 and R2 of the same session (minutes apart). If A cites URL X in R1 and B fetches X in R2, B may see slightly different content than A saw. Rare at session timescales; named as a known limitation (R-v2-10), not a blocker.
 
-### D20 — 300s per-expert timeout when tools enabled
+### D20 — 300s per-expert timeout (shipped default)
 
-Current `defaults/default.yaml` sets `timeout: 180s` per expert. v2's loader requires an explicit per-expert timeout (`pkg/config/loader.go`); there is no default fallback. Rather than add a conditional default keyed on `tools`, the shipped `default.yaml` simply bumps each expert's `timeout` to `300s` when tools land.
+Shipped `default.yaml` ships with `timeout: 300s` per expert, bumped from the pre-tools 180s. Loader continues to require explicit per-expert timeout (`pkg/config/loader.go`).
 
 **Calibration basis:** smoke runs against live Claude Code (§Verification) complete a two-URL R2 verification task in ~20s. 300s is ~10× worst-observed; it gives 2–3× headroom for rate-limit retries inside `pkg/runner` plus slower multi-fetch scenarios without silently cutting off tool-use requests.
 
 Operators who want longer timeouts override per-expert in their own profile.
 
-### D21 — Audit trail: deferred to v2.1
+### D21 — No structured audit in v2; inline URL citations are the audit surface
 
-`verdict.json` does **not** gain a structured `web_fetches` field in v2. Two intertwined reasons.
+`verdict.json` does **not** gain a `web_fetches` field. The audit story in v2 is:
 
-**What a structured audit would need.** `verdict.json.experts[].web_fetches = [{url, round, fetched_at}, ...]` requires intercepting each `WebFetch` tool call as it happens. That information is not in `--output-format text` — the text format only shows the model's final prose. It *is* in `--output-format stream-json`, verified by smoke 2: stdout becomes newline-delimited JSON events including `{type: "assistant", message: {content: [{type: "tool_use", name: "WebFetch", input: {url: ...}}]}}`.
+- R1/R2 prompts instruct experts to cite URLs they actually fetched (prompt discipline, see D18).
+- Those citations appear inline in `rounds/*/experts/*/output.md`.
+- The operator queries with `grep -oE 'https?://[^ ]+' rounds/*/experts/*/output.md` (or equivalent).
 
-**Why switching formats is a v2.1 increment, not this PR.** The current executor's contract is "spawn `claude -p --output-format text`, its stdout *is* the expert's answer — write it to `output.md`, done." Moving to stream-json changes every layer of that contract:
+**Why not stream-json + structured audit.** An earlier draft of this ADR proposed switching the executor to `--output-format stream-json` so `tool_use` events with URLs could populate a structured per-expert field. That switch costs a new parser, a frozen transcript fixture for CI, truncation-handling logic, and ongoing coupling to Anthropic's event schema (if their shape changes, our executor breaks silently). For a one-user project with no existing forensic workflow, the benefit is hypothetical — inline citations answer "which URLs showed up" and `grep -l` narrows it to which expert. YAGNI-строго.
 
-1. The executor no longer writes raw stdout to `output.md` — it must reassemble the final answer from concatenated `text` content-blocks (or from the terminal `result` event), then write that.
-2. The executor must parse every event line, tolerate malformed JSON on network hiccups, and not confuse a mid-stream truncation with "expert is done."
-3. The existing 429 / rate-limit retry semantics in `pkg/runner` work on subprocess exit codes — those still work, but any event-stream parser errors add a second failure mode to distinguish from subprocess errors.
-4. The stream-json event schema is owned by Anthropic, not us; coupling to it means a schema drift upstream can break the executor. With `text` output we are coupled only to "claude prints an answer."
-
-Separately, the audit's value is uncertain pre-launch. In practice, experts prompted to cite URLs inline (see D18 + the R1/R2 prompt updates) produce operator-visible URL lists in `output.md`. The question "did an expert fetch URL X" is answered by `grep http rounds/*/experts/*/output.md`. That's a text-grep, not a JSON query — but it's also five characters in the terminal and zero implementation cost. If operators hit the ceiling of inline-URL audit, *then* D21 moves to the top of v2.1. Building it now is speculative work.
-
-**Scope boundary.** ADR-0010's job is "tools on, experts can research." Audit quality is a downstream concern that can be layered on without revisiting this ADR. The `web_fetches` field is additive when it lands (no schema version bump), so the deferral is not a forward-compat commitment that will bite later.
-
-**What you lose by deferring:** nothing now. You only lose "easy structured post-hoc analytics across sessions" if a future workflow wants that — at which point v2.1's stream-json switch delivers it.
+If a real use case ever shows up where per-fetch ordering, timing, or "fetched-but-not-cited" detection matters, this decision is cheaply reversed: add a stream-json executor mode, populate the field, bump no schema version. Until then, nothing is built.
 
 ## Alternatives considered
 
-**a) Tools always-on, no profile flag.** Rejected. Operator should be able to disable tools for determinism-sensitive runs (replaying a session folder to debug a verdict) without editing prompts. The operator may also want to run priors-only for cost reasons.
+**a) Profile-level `tools: { web_search, web_fetch }` block (the earlier shape of this ADR).** Rejected. A boolean that is always set to `true` in the shipped default is not a config knob — it is config surface that begs to be wrong. If we ever want priors-only (debugging determinism, benchmarking without network), it is one argv tweak in the executor at that point; the shape of that future flag is a v3 concern when a real use case exists.
+
+**a2) `--no-tools` CLI kill-switch.** Rejected, same reasoning. A kill-switch without a use case today either sits unused (config surface rot) or is reached for once and never again (over-built). If we hit a real workflow that needs it, adding a flag takes ~10 lines — not building it now is zero lines.
 
 **b) Per-expert tools (one researcher, one skeptic, one generalist).** Deferred to v3. A-HMAD (Zhou & Chen 2025) measures role heterogeneity at **+3.5% on reasoning benchmarks, +4–6% over standard debate, and 30% fewer factual errors on biography generation.** Tool-MAD (Ko et al. 2026) adds heterogeneous per-agent tool assignment on top and reports wide margins over vanilla debate on FEVER / FEVEROUS / FAVIQ. That's the prize we're deliberately postponing. The reason v3, not v2: A-HMAD's gains come from the *combination* of distinct personas + distinct tool surfaces. v2 has neither — single profile, homogeneous prompts, single model. Adding per-expert tools alone would cargo-cult the cheaper half and sample a less-validated slice of the design space. v3's multi-vendor + per-expert profile work is where role heterogeneity lands as a unit.
 
@@ -178,7 +159,7 @@ Five live smokes against the current `claude` CLI. Scripts and raw output in `/t
 
 1. **Flag surface:** `claude -p - --model sonnet --output-format text --allowedTools WebSearch,WebFetch --permission-mode bypassPermissions --no-session-persistence` exits 0, produces text output, tools available, no interactive prompts. Single WebFetch task: 18s wall.
 
-2. **Tool-use event visibility:** `--output-format stream-json --verbose` exposes `tool_use` events with `name: "WebFetch"`, `input.url`, and per-event `usage.*`. Confirms D21 is feasible when the executor is ready for a stream-json switch.
+2. **Tool-use event visibility:** `--output-format stream-json --verbose` exposes `tool_use` events with `name: "WebFetch"`, `input.url`, and per-event `usage.*`. Confirms a structured audit would be feasible *if* we wanted one — D21 rejects it for v2 on YAGNI grounds but this smoke result is what makes the reversal cheap if a real use case ever shows up.
 
 3. **R2 verification latency:** realistic R2 prompt (verify peer's claim about Go version, fetch 2 URLs, cite sources) completes in 20s. Well under D20's 300s budget.
 
@@ -192,12 +173,11 @@ New rows in v2.md §8:
 
 | # | Fitness | Concrete check |
 |---|---------|----------------|
-| F13 | Tools reach experts when enabled | With `tools.web_search: true`, at least one expert's `executor.Request.AllowedTools` contains `"WebSearch"` (verified via mock executor recording the flag set) |
-| F14 | Tools off when disabled | With `tools.web_search: false`, executor does not pass `--allowedTools WebSearch` |
+| F13 | Experts always spawn with WebSearch + WebFetch | Every expert `executor.Request.AllowedTools` contains `"WebSearch"` and `"WebFetch"` (verified via mock executor recording the flag set). Hardcoded in the expert spawn path, not gated on any config. |
 | F16 | Round-specific prompts applied | R1 expert prompt contains the R1 prompt body; R2 expert prompt contains the R2 prompt body (existing invariant; F16 makes it explicit in the fitness table) |
-| F17 | Ballot tools are always off | Ballot subprocess executor request has `AllowedTools: nil` regardless of profile `tools:` setting |
+| F17 | Ballot tools always off | Ballot subprocess executor request has `AllowedTools: nil` — hardcoded in `pkg/debate/vote.go`, independent of the expert spawn path. |
 
-F15 and F15b (forgery regex behavior) are specified in ADR-0011.
+F15 / F15a–d (forgery regex behavior) are specified in ADR-0011.
 
 ## Risks
 
@@ -213,14 +193,11 @@ F15 and F15b (forgery regex behavior) are specified in ADR-0011.
 
 ## Migration
 
-One user (the author). No multi-tenant migration story. The bump is: merge this PR, merge the implementation PR that lands alongside the ralphex plan, and the shipped `default.yaml` gets `tools:` on + per-expert `timeout: 300s`. No old sessions to convert; `.council/sessions/<id>/profile.snapshot.yaml` is already self-contained per v1 §5 so historical sessions replay against the binary that produced them.
-
-If for some reason a priors-only run is needed (debugging determinism, sandbox without network), set `tools: { web_search: false, web_fetch: false }` in `./.council/default.yaml` or pass `--profile` to a file that does.
+One user (the author). No multi-tenant migration story. The bump is: merge this PR, merge the implementation PR, and the shipped `default.yaml` gets per-expert `timeout: 300s`. Tools are hardcoded in the executor — no config key touched. `.council/sessions/<id>/profile.snapshot.yaml` is already self-contained per v1 §5 so historical sessions replay against the binary that produced them.
 
 ## Open questions
 
-- **Structured audit timing.** D21 defers `verdict.json.experts[].web_fetches` to v2.1. If operators complain before then, the rollout order might flip (stream-json first, then structured field).
-- **`--no-tools` runtime flag.** Currently operators disable tools by editing the profile. A `--no-tools` CLI flag would let operators run priors-only without touching config. Not blocking v2; consider for v2.1.
+None at time of writing.
 
 ## Status
 

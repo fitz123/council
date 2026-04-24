@@ -10,7 +10,7 @@
 
 ### 1.1 The expert's tool surface
 
-Experts run with `WebSearch` and `WebFetch` available by default. The executor invocation grows two flags:
+Experts always spawn with `WebSearch` and `WebFetch` available. The claudecode executor invocation for every expert is:
 
 ```
 claude -p - --model <model> --output-format text \
@@ -18,7 +18,7 @@ claude -p - --model <model> --output-format text \
   --permission-mode bypassPermissions
 ```
 
-Emitted only when the profile enables tools. An empty `AllowedTools` slice reproduces v1/original-v2 behavior exactly. Verified on live Claude Code — see ADR-0010 §Verification.
+Hardcoded in the executor — no profile `tools:` block, no `--no-tools` CLI flag, no environment variable (see ADR-0010 D17). Verified on live Claude Code — see ADR-0010 §Verification.
 
 ### 1.2 The prompt surface
 
@@ -31,7 +31,7 @@ Both prompts still handle the operator question (injected via the unchanged prom
 
 ### 1.3 The ballot surface
 
-The ballot subprocess runs with **tools off, hardcoded** — no profile knob. The ballot prompt is "output ONLY the line: VOTE: <label>"; there is nothing to fetch, so `AllowedTools` is always `nil` for ballots regardless of the session-level `tools:` setting.
+The ballot subprocess runs with **tools off, hardcoded** — separate from the expert spawn path. The ballot prompt is "output ONLY the line: VOTE: <label>"; there is nothing to fetch, and tool-use events would corrupt tally extraction. `AllowedTools` is always `nil` for ballots, set in `pkg/debate/vote.go`.
 
 ### 1.4 The fence surface (ADR-0011 amendment)
 
@@ -44,7 +44,11 @@ The forgery regex tightens to require the `[nonce-<16hex>]` shape, so benign mar
 
 ### 1.5 The verdict surface
 
-No schema change in v2. `verdict.json.experts[].web_fetches` (structured URL audit) is deferred to v2.1 — see ADR-0010 D21. For v2, fetched URLs appear inline in each expert's `output.md` (prompt discipline); operators grep for them.
+No schema change. `verdict.json.experts[].web_fetches` was drafted and rejected — see ADR-0010 D21. Audit surface is inline URL citations in `rounds/*/experts/*/output.md` via R1/R2 prompt discipline; operators grep when they need to query.
+
+### 1.6 The CLI surface
+
+No new flags. Tools are hardcoded on in the executor; there is no `--no-tools` switch. If a real use case ever shows up for tools-off, adding a flag is ~10 lines at that point. See ADR-0010 D17 alternatives for the reasoning.
 
 ## 2. Walkthrough — what changes in §3's trace
 
@@ -103,7 +107,7 @@ At N=3 × K=2 in parallel, expect **3–5 minutes** of total wall time for a typ
 ## 6. What operators should know
 
 - **Determinism.** Web search results and page content change. Replaying a session folder from a week ago won't reproduce exact transcripts if the experts hit live web. v1's reproducibility principle (same `session_id` → same label assignment, same prompt structure) still holds; content reproducibility depends on the live web being static, which it isn't.
-- **Disabling tools.** Set `tools.web_search: false` and `tools.web_fetch: false` in the profile. Use for deterministic debugging or priors-only runs.
-- **Timeouts.** Shipped `default.yaml` ships with 300s per expert when tools are enabled. Raise further if your typical questions need many fetches.
-- **Audit trail.** Fetched URLs appear inline in `rounds/*/experts/*/output.md`. Structured `web_fetches` field is deferred to v2.1.
-- **Ballots are always tools-off.** This is hardcoded, not operator-configurable.
+- **Disabling tools.** Not supported in v2 — tools are hardcoded on in the claudecode executor. Real use cases for tools-off (benchmarking, sandbox-without-network, determinism replay) would warrant a flag; none exists today.
+- **Timeouts.** Shipped `default.yaml` ships with 300s per expert. Raise further if your typical questions need many fetches.
+- **Audit trail.** Inline URL citations appear in `rounds/*/experts/*/output.md` via R1/R2 prompt discipline. Query with `grep -oE 'https?://[^ ]+' rounds/*/experts/*/output.md`. No structured `web_fetches` field in `verdict.json`.
+- **Ballots are always tools-off.** Hardcoded separately from expert spawn, enforced in `pkg/debate/vote.go`.
