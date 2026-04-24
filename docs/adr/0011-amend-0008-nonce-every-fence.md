@@ -10,7 +10,7 @@
 ADR-0008 (Round 4 sign-off) specifies a two-check forgery scanner on every LLM-sourced output before it feeds a downstream prompt:
 
 1. Reject if the output contains the session nonce as a substring.
-2. Reject if the output contains a line matching `(?m)^=== .* ===$` (any delimiter-shaped line).
+2. Reject if the output contains a line matching `(?m)^=== .* ===[ \t\r]*$` (any delimiter-shaped line, with CRLF / trailing-whitespace tolerance — see `pkg/prompt/injection.go:43` for the reasoning behind the trailing-whitespace class).
 
 ADR-0008 line 40 explicitly defends the broad regex in (2):
 

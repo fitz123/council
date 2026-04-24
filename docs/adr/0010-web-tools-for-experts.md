@@ -19,7 +19,9 @@ This ADR records the decision to add web tools, the scope, and what it costs.
 
 ## Decision
 
-Experts always run with `WebSearch` and `WebFetch` available. This is hardcoded in the `claudecode` executor — no profile flag, no CLI kill-switch, no operator toggle. Augment the existing R1 (`defaults/prompts/independent.md`) and R2 (`defaults/prompts/peer-aware.md`) prompts — already round-specific per the repo's `round_2_prompt_file` mechanism — with research and verification discipline. Tighten the D11 forgery regex (amended in companion ADR-0011, which also nonce-tags every structural fence in the protocol).
+Experts always run with `WebSearch` and `WebFetch` available. **Policy** lives in the debate layer: `pkg/debate/rounds.go` sets `executor.Request.AllowedTools = []string{"WebSearch", "WebFetch"}` and `PermissionMode = "bypassPermissions"` from package-level constants for every expert spawn. **Mechanism** lives in the executor: `pkg/executor/claudecode` just translates those `Request` fields into `--allowedTools` and `--permission-mode` argv tokens. The executor stays generic — future v3 executors (Codex, Gemini) consume the same `Request` fields without re-hardcoding the same policy.
+
+No profile `tools:` block, no CLI kill-switch, no environment variable. Augment the existing R1 (`defaults/prompts/independent.md`) and R2 (`defaults/prompts/peer-aware.md`) prompts — already round-specific per the repo's `round_2_prompt_file` mechanism — with research and verification discipline. Tighten the D11 forgery regex (amended in companion ADR-0011, which also nonce-tags every structural fence in the protocol).
 
 **Scope covered:**
 
@@ -42,17 +44,21 @@ Experts always run with `WebSearch` and `WebFetch` available. This is hardcoded 
 
 ## Design
 
-### D17 — Tools always-on for experts (no config surface)
+### D17 — Tools always-on for experts (policy in debate layer, mechanism in executor)
 
-The `claudecode` executor, when called on behalf of an expert, always appends `--allowedTools WebSearch,WebFetch --permission-mode bypassPermissions` to the argv. There is no profile `tools:` block, no `--no-tools` CLI flag, no environment variable. One behaviour, hardcoded.
+**Layering.** `pkg/debate/rounds.go` owns the policy: every expert spawn sets `Request.AllowedTools = []string{"WebSearch", "WebFetch"}` and `Request.PermissionMode = "bypassPermissions"` from package constants (`defaultExpertTools`, `defaultPermissionMode`). `pkg/executor/claudecode` owns the mechanism: if `Request.AllowedTools` is non-empty, append `--allowedTools <csv>`; if `Request.PermissionMode` is non-empty, append `--permission-mode <mode>`. An empty slice and empty string produce the pre-ADR argv (v1 behaviour preserved for any caller with a bare Request).
 
-**Why no knob:** every operator-visible config surface is a maintenance and review cost. We are one user on one project; the question "would I ever want tools off?" has two honest answers — (a) "for deterministic replay of an old session" (already handled by session-folder-as-database: replay happens against the binary that produced the session, and profile snapshots freeze the prompt/model but do not try to freeze the live web), and (b) "for cheaper priors-only runs" (speculative; not a real workflow today). Neither justifies the config surface. If either becomes real, a flag is a cheap additive change.
+No profile `tools:` block, no `--no-tools` CLI flag, no environment variable. One behaviour, hardcoded at exactly one layer.
 
-**Why ballots still off:** a separate internal rule, not an operator choice. The ballot subprocess is a one-line `VOTE: <label>` contract; tool calls there would produce output that could corrupt tally extraction. Enforced in `pkg/debate/vote.go` by passing `AllowedTools: nil` regardless of anything upstream.
+**Why debate-layer policy, not executor-layer:** this is a tool-availability *decision* for experts, not a CLI translation quirk. Future v3 executors (Codex, Gemini) will each need the same decision applied to their own API, and they should read it from `Request.AllowedTools` rather than re-hardcoding the same list in their own argv builders. Keep policy where the decision lives (what tools experts get) and mechanism where the translation lives (how each CLI expresses that).
+
+**Why no knob at any layer:** every operator-visible config surface is a maintenance and review cost. We are one user on one project; the question "would I ever want tools off?" has two honest answers — (a) "for deterministic replay of an old session" (already handled by session-folder-as-database: replay happens against the binary that produced the session, and profile snapshots freeze the prompt/model but do not try to freeze the live web), and (b) "for cheaper priors-only runs" (speculative; not a real workflow today). Neither justifies the config surface. If either becomes real, a flag is a cheap additive change.
+
+**Why ballots still off:** a separate internal rule, not an operator choice. The ballot subprocess is a one-line `VOTE: <label>` contract; tool calls there would produce output that could corrupt tally extraction. Enforced in `pkg/debate/vote.go` by explicitly setting `AllowedTools: nil` when constructing the ballot `executor.Request` — independent of the expert spawn path, not "the negation of expert defaults."
 
 **On `--permission-mode bypassPermissions`:** smoke-verified **not strictly required** in default installations — `claude -p --allowedTools WebSearch,WebFetch` works as-is, 15s single-fetch round-trip (smoke 5). Set anyway as belt-and-braces against installations with restrictive default permission config (custom `settings.json`, corporate policy) where an unapproved tool-use request in non-interactive `-p` mode has no way to prompt and would stall until timeout. Cost is one extra argv token.
 
-**Effect on the `executor.Request` contract:** `AllowedTools []string` and `PermissionMode string` are added to `Request` as additive fields. The claudecode adapter sets them for expert spawns, leaves them empty for ballot spawns. An empty `AllowedTools` produces no `--allowedTools` flag (unchanged v1 behaviour) so any test that hits the executor with a bare Request keeps working.
+**Effect on the `executor.Request` contract:** two additive fields — `AllowedTools []string` and `PermissionMode string`. This IS a contract change; `pkg/executor/executor.go`'s docstring says field-for-field with `docs/design/v1.md §7` and requires updating both the design doc and the matching ADR when the Request shape changes. This ADR is that matching ADR; the implementation plan includes the v1.md §7 update (see plan Task 4).
 
 ### D18 — Round-specific prompt content (existing schema unchanged)
 

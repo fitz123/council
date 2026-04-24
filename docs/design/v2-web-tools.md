@@ -18,7 +18,7 @@ claude -p - --model <model> --output-format text \
   --permission-mode bypassPermissions
 ```
 
-Hardcoded in the executor — no profile `tools:` block, no `--no-tools` CLI flag, no environment variable (see ADR-0010 D17). Verified on live Claude Code — see ADR-0010 §Verification.
+**Layering** (see ADR-0010 D17): the always-on policy is hardcoded in the expert-spawn path at the debate layer — `pkg/debate/rounds.go` sets `Request.AllowedTools` and `Request.PermissionMode` from package constants for every expert. The `claudecode` executor only translates those request fields into CLI flags; it owns mechanism, not policy. No profile `tools:` block, no `--no-tools` CLI flag, no environment variable. Verified on live Claude Code — see ADR-0010 §Verification.
 
 ### 1.2 The prompt surface
 
