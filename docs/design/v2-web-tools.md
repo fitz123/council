@@ -88,7 +88,7 @@ v2.md §7.2 names "3–5× token amplification" vs. v1 as a known cost. With web
 
 Empirically (based on Tool-MAD and PROClaim — citations in ADR-0010), expect a further 2–3× amplification on research-heavy questions. Total v2+tools runs cost roughly **8–15× a v1 single-pass run**. Operator-facing note for the README.
 
-No cache means R2 experts verifying a peer URL re-pay the fetch cost. Caching considered and rejected for v2 simplicity (ADR-0010 alt d).
+No cache means R2 experts verifying a peer URL re-pay the fetch cost. Caching is deferred as a v3 research item — see ADR-0010 alt (d) for the three technical questions that need to be answered end-to-end before a design can be picked (content addressability, context-injection path, hit-rate).
 
 ## 5. Latency
 

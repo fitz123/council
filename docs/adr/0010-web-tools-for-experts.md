@@ -60,7 +60,9 @@ round_2_prompt_file: prompts/peer-aware.md
 
 Defaults in shipped `default.yaml`: both `true`. The validator rejects the field on `version: 1` configs.
 
-Passed into every expert's `executor.Request` as an `AllowedTools []string` field. The `claudecode` executor translates the list into `--allowedTools WebSearch,WebFetch` and sets `--permission-mode bypassPermissions` (required so tool-use requests do not hang on interactive confirmation — **smoke-verified**; see §Verification).
+Passed into every expert's `executor.Request` as an `AllowedTools []string` field. The `claudecode` executor translates the list into `--allowedTools WebSearch,WebFetch`.
+
+**On `--permission-mode bypassPermissions`:** smoke-verified **not strictly required** in default installations — `claude -p --allowedTools WebSearch,WebFetch` works as-is, 15s single-fetch round-trip (smoke 5). Set it anyway as a belt-and-braces against operator configurations that restrict default permission behavior (custom `settings.json`, corporate policy) where an unapproved tool-use request in non-interactive `-p` mode has no way to prompt and would stall until timeout. Cost is one extra argv token; benefit is deterministic tool availability across installations.
 
 If `AllowedTools` is empty, the executor emits neither flag — v1 behavior preserved for any v1 profile loaded against a v2 binary.
 
@@ -93,23 +95,38 @@ Operators who want longer timeouts override per-expert in their own profile.
 
 ### D21 — Audit trail: deferred to v2.1
 
-`verdict.json` does **not** gain a structured `web_fetches` field in v2.
+`verdict.json` does **not** gain a structured `web_fetches` field in v2. Two intertwined reasons.
 
-Smoke-verified: `--output-format stream-json` emits per-tool-use events with `name: "WebFetch"` and the URL in `input.url` (see §Verification), so a structured audit *is* feasible. But the current executor reads `--output-format text` as a plain stdout stream; switching to stream-json requires parsing an evolving event schema and updating every stdout consumer. That work is a v2.1 increment.
+**What a structured audit would need.** `verdict.json.experts[].web_fetches = [{url, round, fetched_at}, ...]` requires intercepting each `WebFetch` tool call as it happens. That information is not in `--output-format text` — the text format only shows the model's final prose. It *is* in `--output-format stream-json`, verified by smoke 2: stdout becomes newline-delimited JSON events including `{type: "assistant", message: {content: [{type: "tool_use", name: "WebFetch", input: {url: ...}}]}}`.
 
-For v2, experts are prompted to include fetched URLs inline in their `output.md` (prompt discipline). Operators who need an audit trail grep `rounds/*/experts/*/output.md` for `http`.
+**Why switching formats is a v2.1 increment, not this PR.** The current executor's contract is "spawn `claude -p --output-format text`, its stdout *is* the expert's answer — write it to `output.md`, done." Moving to stream-json changes every layer of that contract:
 
-This decision is reversible: when v2.1 lands the stream-json switch, `verdict.json.experts[].web_fetches` is an additive field — no schema version bump.
+1. The executor no longer writes raw stdout to `output.md` — it must reassemble the final answer from concatenated `text` content-blocks (or from the terminal `result` event), then write that.
+2. The executor must parse every event line, tolerate malformed JSON on network hiccups, and not confuse a mid-stream truncation with "expert is done."
+3. The existing 429 / rate-limit retry semantics in `pkg/runner` work on subprocess exit codes — those still work, but any event-stream parser errors add a second failure mode to distinguish from subprocess errors.
+4. The stream-json event schema is owned by Anthropic, not us; coupling to it means a schema drift upstream can break the executor. With `text` output we are coupled only to "claude prints an answer."
+
+Separately, the audit's value is uncertain pre-launch. In practice, experts prompted to cite URLs inline (see D18 + the R1/R2 prompt updates) produce operator-visible URL lists in `output.md`. The question "did an expert fetch URL X" is answered by `grep http rounds/*/experts/*/output.md`. That's a text-grep, not a JSON query — but it's also five characters in the terminal and zero implementation cost. If operators hit the ceiling of inline-URL audit, *then* D21 moves to the top of v2.1. Building it now is speculative work.
+
+**Scope boundary.** ADR-0010's job is "tools on, experts can research." Audit quality is a downstream concern that can be layered on without revisiting this ADR. The `web_fetches` field is additive when it lands (no schema version bump), so the deferral is not a forward-compat commitment that will bite later.
+
+**What you lose by deferring:** nothing now. You only lose "easy structured post-hoc analytics across sessions" if a future workflow wants that — at which point v2.1's stream-json switch delivers it.
 
 ## Alternatives considered
 
 **a) Tools always-on, no profile flag.** Rejected. Operator should be able to disable tools for determinism-sensitive runs (replaying a session folder to debug a verdict) without editing prompts. The operator may also want to run priors-only for cost reasons.
 
-**b) Per-expert tools (one researcher, one skeptic, one generalist).** Deferred to v3. A-HMAD (Zhou & Chen 2025) shows role heterogeneity helps, but v2's single-prompt-per-round design doesn't carry the other half of A-HMAD (distinct agent personas). Adding per-expert tools without distinct roles would be cargo-culting the easier half.
+**b) Per-expert tools (one researcher, one skeptic, one generalist).** Deferred to v3. A-HMAD (Zhou & Chen 2025) measures role heterogeneity at **+3.5% on reasoning benchmarks, +4–6% over standard debate, and 30% fewer factual errors on biography generation.** Tool-MAD (Ko et al. 2026) adds heterogeneous per-agent tool assignment on top and reports wide margins over vanilla debate on FEVER / FEVEROUS / FAVIQ. That's the prize we're deliberately postponing. The reason v3, not v2: A-HMAD's gains come from the *combination* of distinct personas + distinct tool surfaces. v2 has neither — single profile, homogeneous prompts, single model. Adding per-expert tools alone would cargo-cult the cheaper half and sample a less-validated slice of the design space. v3's multi-vendor + per-expert profile work is where role heterogeneity lands as a unit.
 
 **c) Single unified R1+R2 prompt ("verify what you cite and what you're shown").** Rejected. v2 already ships two round-specific prompts for a reason (§3.2: R1 and R2 have different mental tasks). R2 deserves prompt language specifically pushing back on peer deference (Wan et al. 2025); R1 has no prior round to defer to, and mixing the framing confuses both.
 
-**d) Session-local fetch cache.** Considered. Rejected for v2 on complexity grounds — new folder layout, new schema fields, new prompt scaffold ("Peer A fetched these URLs: [...]. Read them from ./fetches/ before fetching yourself.") for small gains. v3 candidate if token costs bite.
+**d) Session-local fetch cache.** Deferred to v3 as an open research question, not a settled rejection. The framing is time/cost optimization: on a typical R2 run every peer-cited URL is re-fetched from scratch, paying fetch latency + token cost for pages that are byte-identical to what R1 already saw. A cache would amortize that. The open questions are all technical, and none have been investigated end-to-end:
+
+- **Is fetched content addressable for cache injection at all?** WebFetch returns page content to the model context, not to an operator-readable file on disk. Intercepting it requires either (i) parsing `--output-format stream-json` tool_result events (feasible per smoke 2, but the same executor-contract switch D21 defers) or (ii) a file-based MCP shim that writes fetches to session-local storage. Neither is drop-in.
+- **How does a cached fetch get into an R2 expert's context?** Prompt scaffolding (`"Peer A fetched these URLs: [...]; read them from ./fetches/ before re-fetching"`) is one path but couples R2 prompts to session file layout. An alternative is a session-local MCP server exposing cached fetches as a tool — cleaner layering but new moving piece.
+- **Is the hit rate high enough to matter?** Peer R2 verification often fetches the same URL as R1 peers cited; R2 experts following up on different claims may fetch different URLs. The break-even on build cost vs. token savings is a measurement question, not an a priori judgment.
+
+v2 ships without cache; R2 re-fetches permitted (D19). A v3 research task should answer the three bullets before we pick a design. Until then this is a tradeoff worth naming, not a finished argument.
 
 **e) Structured retriever/debater role split (MADRA/MADKE pattern).** Rejected as too large a change. v2's debate engine is one flow; forcing retrieval into a separate agent role contradicts v2 D5 (single default profile, one flow for every question).
 
@@ -157,7 +174,7 @@ Organized strongest-to-weakest by direct relevance.
 
 ## Verification (smoke-verified 2026-04-24)
 
-Four live smokes against the current `claude` CLI. Scripts and raw output in `/tmp/council-smoke/`, not committed.
+Five live smokes against the current `claude` CLI. Scripts and raw output in `/tmp/council-smoke/`, not committed.
 
 1. **Flag surface:** `claude -p - --model sonnet --output-format text --allowedTools WebSearch,WebFetch --permission-mode bypassPermissions --no-session-persistence` exits 0, produces text output, tools available, no interactive prompts. Single WebFetch task: 18s wall.
 
@@ -166,6 +183,8 @@ Four live smokes against the current `claude` CLI. Scripts and raw output in `/t
 3. **R2 verification latency:** realistic R2 prompt (verify peer's claim about Go version, fetch 2 URLs, cite sources) completes in 20s. Well under D20's 300s budget.
 
 4. **Regex false-positive case:** WebFetch-summarising a Wikipedia section naturally produces `=== Branding and Styling ===`, `=== Generics ===`, `=== Versioning ===` as divider lines in the model's output. Confirms the current broad forgery regex in `pkg/prompt/injection.go:43` would reject these outputs as forged — the exact class of false positive this feature introduces. Fixed by ADR-0011 (tighten regex + nonce every structural fence).
+
+5. **`--permission-mode bypassPermissions` is not strictly required.** Same flag surface *without* `--permission-mode` exits 0 in 15s with real URL cited. Default `-p` permission behavior allows WebSearch/WebFetch in a freshly-auth'd installation. The flag is kept as a robustness measure (see D17) but is not the "required so tool-use requests do not hang" claim the webfetch scratch doc originally made.
 
 ## Fitness functions
 
@@ -194,11 +213,9 @@ F15 and F15b (forgery regex behavior) are specified in ADR-0011.
 
 ## Migration
 
-**v1 users:** no change. Loading a v1 profile against a v2+tools binary still works — `tools` is a v2-only field. An empty `AllowedTools` slice reproduces v1-equivalent behavior.
+One user (the author). No multi-tenant migration story. The bump is: merge this PR, merge the implementation PR that lands alongside the ralphex plan, and the shipped `default.yaml` gets `tools:` on + per-expert `timeout: 300s`. No old sessions to convert; `.council/sessions/<id>/profile.snapshot.yaml` is already self-contained per v1 §5 so historical sessions replay against the binary that produced them.
 
-**v2 users (pre-tools):** update `default.yaml` to include the `tools:` block. The shipped default enables tools; operators who want the old priors-only behavior set both booleans to `false`.
-
-**v2 users bumping timeouts:** shipped `default.yaml` raises each expert's `timeout` to `300s`. Operators with custom profiles that explicitly set `timeout: 180s` keep their value; no silent override.
+If for some reason a priors-only run is needed (debugging determinism, sandbox without network), set `tools: { web_search: false, web_fetch: false }` in `./.council/default.yaml` or pass `--profile` to a file that does.
 
 ## Open questions
 
