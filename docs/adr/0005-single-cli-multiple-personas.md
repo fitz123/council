@@ -1,6 +1,12 @@
 # ADR-0005: Single model/CLI at MVP; multiple expert personas
 
-**Status:** Proposed.
+**Status:** Superseded by ADR-0012 (2026-04-25).
+
+> v3 lifts the single-CLI constraint this ADR preserved through v1
+> and v2. See `docs/adr/0012-multi-cli-executors.md` for the
+> cross-vendor executor design. The text below is retained for
+> historical continuity and for the design rationale that still
+> applies to the N>=2 expert count invariant (unchanged by v3).
 
 ## Context
 
