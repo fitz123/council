@@ -28,8 +28,14 @@ type stubExec struct {
 	calls    int64
 }
 
-func (s *stubExec) Name() string       { return s.name }
-func (s *stubExec) BinaryName() string { return s.name }
+func (s *stubExec) Name() string { return s.name }
+
+// BinaryName returns "sh" so cmd/council.Preflight resolves it via
+// exec.LookPath without needing a real claude/codex/gemini binary on
+// the test host. The real value of BinaryName per executor is asserted
+// in pkg/executor/{claudecode,codex,gemini}_test.go; here we just need
+// a name LookPath can find.
+func (s *stubExec) BinaryName() string { return "sh" }
 func (s *stubExec) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	atomic.AddInt64(&s.calls, 1)
 	p := filepath.ToSlash(req.StdoutFile)
@@ -415,7 +421,7 @@ type interruptibleStub struct {
 }
 
 func (s *interruptibleStub) Name() string       { return s.name }
-func (s *interruptibleStub) BinaryName() string { return s.name }
+func (s *interruptibleStub) BinaryName() string { return "sh" }
 func (s *interruptibleStub) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	select {
 	case s.started <- struct{}{}:

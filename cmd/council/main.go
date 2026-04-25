@@ -153,6 +153,15 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		return exitConfigError
 	}
 
+	// Preflight: every expert's BinaryName resolves on PATH. Without
+	// this, a missing CLI surfaces as N near-identical "exec: ... not
+	// found" lines deep inside debate.Run instead of one up-front
+	// failure naming the binary and the offending profile line.
+	if err := Preflight(profile); err != nil {
+		fmt.Fprintf(stderr, "council: %v\n", err)
+		return exitConfigError
+	}
+
 	nonce, err := debate.GenerateNonce()
 	if err != nil {
 		fmt.Fprintf(stderr, "council: generate session nonce: %v\n", err)
@@ -305,6 +314,10 @@ func runResume(ctx context.Context, argv []string, stdout, stderr io.Writer) int
 	_ = os.Remove(filepath.Join(sess.Path, "verdict.json.tmp"))
 
 	if err := orchestrator.Validate(profile); err != nil {
+		fmt.Fprintf(stderr, "council resume: %v\n", err)
+		return exitConfigError
+	}
+	if err := Preflight(profile); err != nil {
 		fmt.Fprintf(stderr, "council resume: %v\n", err)
 		return exitConfigError
 	}
