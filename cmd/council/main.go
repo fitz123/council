@@ -187,6 +187,7 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 
 	if verbose {
 		logEnd(stderr, sess, v)
+		logArtifacts(stderr, sess, v)
 	}
 
 	switch {
@@ -487,6 +488,82 @@ func logEnd(w io.Writer, sess *session.Session, v *session.Verdict) {
 	}
 	fmt.Fprintf(w, "[%s] session %s: %.1fs total\n", ts, v.Status, v.DurationSeconds)
 	fmt.Fprintf(w, "[%s] session folder: %s\n", ts, sess.Path)
+}
+
+// logArtifacts dumps each expert's round output and per-voter ballot blocks
+// to w after the timing summary. Lets a verbose run answer "who said what
+// and who voted for whom" without having to open files in the session folder.
+// Each section is independent: rounds with no readable output.md are skipped,
+// individual unreadable per-expert output.md files are skipped, and the
+// ballot section emits whenever v.Voting.Ballots is populated even if no
+// rounds completed (e.g. resumed session that only re-ran the voting stage).
+// All artifact bodies are scrubbed of C0/DEL control bytes via
+// stripControlBytes before being written, so a malicious or malformed LLM
+// output cannot rewrite the operator's terminal state via ANSI/OSC escapes.
+func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
+	if v == nil || sess == nil {
+		return
+	}
+	for idx, r := range v.Rounds {
+		for _, e := range r.Experts {
+			path := filepath.Join(sess.RoundExpertDir(idx+1, e.Label), "output.md")
+			body, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "\n=== round %d expert %s (%s) ===\n", idx+1, e.Label, e.RealName)
+			fmt.Fprintln(w, stripControlBytes(strings.TrimRight(string(body), "\n")))
+		}
+	}
+	if v.Voting != nil && len(v.Voting.Ballots) > 0 {
+		realName := make(map[string]string, len(v.Experts))
+		for _, e := range v.Experts {
+			realName[e.Label] = e.RealName
+		}
+		for _, b := range v.Voting.Ballots {
+			fmt.Fprintf(w, "\n=== ballot %s (%s) ===\n", b.VoterLabel, realName[b.VoterLabel])
+			path := filepath.Join(sess.Path, "voting", "votes", b.VoterLabel+".txt")
+			body, err := os.ReadFile(path)
+			switch {
+			case err == nil:
+				fmt.Fprintln(w, stripControlBytes(strings.TrimRight(string(body), "\n")))
+			case b.VotedFor != "":
+				// File missing/unreadable but the verdict has a vote
+				// recorded — fall back to the structured outcome so the
+				// operator can always see "who voted for whom" even if
+				// the on-disk artifact was wiped between the run and
+				// this dump.
+				fmt.Fprintf(w, "VOTE: %s\n", b.VotedFor)
+			}
+			if b.VotedFor == "" {
+				fmt.Fprintln(w, "(no vote — discarded)")
+			}
+		}
+	}
+}
+
+// stripControlBytes scrubs LLM-controlled artifact bodies of terminal-
+// interpreting control characters before they are written to the operator's
+// verbose stderr stream. Tab, newline, and carriage return are preserved so
+// multi-line and tabbed content renders normally; every other byte in the
+// C0 range (U+0000..U+001F), DEL (U+007F), and the C1 range (U+0080..U+009F,
+// which includes 0x9B = CSI on 8-bit-clean terminals) becomes U+FFFD so a
+// malformed or malicious peer output cannot clear the screen, rewrite
+// terminal state, or spoof subsequent council log lines.
+func stripControlBytes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r':
+			b.WriteRune(r)
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+			b.WriteRune('�')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // displaySource renders the config source for the verbose preamble. The

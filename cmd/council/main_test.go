@@ -257,7 +257,8 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 }
 
-// TestRun_Verbose verifies the v2 preamble + per-round timing lines.
+// TestRun_Verbose verifies the v2 preamble + per-round timing lines plus
+// the logArtifacts dump (per-expert round outputs + per-voter ballot blocks).
 func TestRun_Verbose(t *testing.T) {
 	t.Chdir(withCouncilDir(t, t.TempDir()))
 	freezeTimestamp(t, "17:02:14")
@@ -277,6 +278,16 @@ func TestRun_Verbose(t *testing.T) {
 		"spawning expert: expert_3",
 		"voting: winner A",
 		"session folder:",
+		// logArtifacts: per-expert round-output blocks render with their
+		// header AND body content (happyStub writes "body-<label>" to
+		// each output.md).
+		"=== round 1 expert ",
+		"=== round 2 expert ",
+		"body-",
+		// logArtifacts: per-voter ballot blocks render with their header
+		// AND ballot content (happyStub emits "VOTE: A\n" for every voter).
+		"=== ballot ",
+		"VOTE: A",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr missing %q; got %s", want, stderr.String())
@@ -529,6 +540,36 @@ func TestResolveVersion(t *testing.T) {
 	version = "v1.2.3-test"
 	if got := resolveVersion(); got != "v1.2.3-test" {
 		t.Errorf("resolveVersion = %q, want v1.2.3-test", got)
+	}
+}
+
+func TestStripControlBytes(t *testing.T) {
+	// Pin the contract so a future logArtifacts edit can't silently
+	// reintroduce raw ANSI/OSC passthrough on stderr.
+	cases := []struct {
+		name, in, want string
+	}{
+		{"plain", "plain text", "plain text"},
+		{"newlines preserved", "line one\nline two\n", "line one\nline two\n"},
+		{"tabs preserved", "tab\there", "tab\there"},
+		{"cr preserved", "cr\rhere", "cr\rhere"},
+		{"esc replaced (ANSI clear-screen)", "esc\x1b[2Jhere", "esc�[2Jhere"},
+		{"bel replaced", "bell\x07after", "bell�after"},
+		{"null replaced", "null\x00byte", "null�byte"},
+		{"del replaced", "del\x7fbyte", "del�byte"},
+		// 8-bit C1 controls — 0x9B is CSI (Control Sequence Introducer) on
+		// 8-bit-clean terminals; without scrubbing, an artifact could inject
+		// ANSI-like sequences without ever emitting an ESC byte.
+		{"c1 csi replaced", "csi[2Jhere", "csi�[2Jhere"},
+		{"c1 padding replaced", "padbyte", "pad�byte"},
+		{"unicode preserved", "café — 日本語", "café — 日本語"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stripControlBytes(c.in); got != c.want {
+				t.Errorf("stripControlBytes(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
 
