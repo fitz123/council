@@ -515,13 +515,16 @@ func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 		for _, e := range v.Experts {
 			realName[e.Label] = e.RealName
 		}
-		fmt.Fprintln(w, "\n=== ballots ===")
 		for _, b := range v.Voting.Ballots {
-			vote := b.VotedFor
-			if vote == "" {
-				vote = "(no vote)"
+			path := filepath.Join(sess.Path, "voting", "votes", b.VoterLabel+".txt")
+			body, err := os.ReadFile(path)
+			fmt.Fprintf(w, "\n=== ballot %s (%s) ===\n", b.VoterLabel, realName[b.VoterLabel])
+			if err == nil {
+				fmt.Fprintln(w, strings.TrimRight(string(body), "\n"))
 			}
-			fmt.Fprintf(w, "  %s (%s) -> %s\n", b.VoterLabel, realName[b.VoterLabel], vote)
+			if b.VotedFor == "" {
+				fmt.Fprintln(w, "(no vote — discarded)")
+			}
 		}
 	}
 }
