@@ -47,7 +47,13 @@ word OK", 30s timeout) to confirm auth.
 Quickly surface which CLIs are present so the user knows what to expect:
 
 ```bash
-which claude codex gemini
+for b in claude codex gemini; do
+  if command -v "$b" >/dev/null 2>&1; then
+    echo "$b: $(command -v "$b")"
+  else
+    echo "$b: not found"
+  fi
+done
 ```
 
 If any are missing, mention them and link to the install instructions in the

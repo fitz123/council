@@ -24,26 +24,42 @@ which council
 
 ## Step 1: Pick a Session
 
-If `$ARGUMENTS` is non-empty, treat it as the session ID and skip selection.
+If `$ARGUMENTS` is non-empty, treat it as the session ID and pass it via
+`--session <id>` in Step 2 — `council resume` does **not** accept a positional
+session argument; the only positional/flag form it supports is `--session`.
 
-Otherwise, list incomplete sessions (those without a root `.done` marker):
+Otherwise, list candidate session directories. Guard the listing so a fresh
+repo (no `.council/sessions/` yet) reports cleanly instead of erroring:
 
 ```bash
-ls -1t .council/sessions/
+test -d .council/sessions && ls -1t .council/sessions/ || echo "no sessions yet"
 ```
 
-Use Glob `.council/sessions/*/` and exclude entries that contain a `.done`
-file at the top level. Show up to 4 most recent incomplete sessions and ask
-the user via AskUserQuestion which to resume — or "Newest" to let council
-pick.
+Use Glob `.council/sessions/*/` to enumerate candidates, then apply council's
+own resumable predicate (D14, see `pkg/session/resume.go`) so you don't offer
+sessions `--session <id>` will reject:
 
-If there are no incomplete sessions, council will exit with code 1 ("no
+- skip if the session has a top-level `.done` marker,
+- skip if `verdict.json` has a final `status` (`ok`, `no_consensus`,
+  `quorum_failed_round_1`, `quorum_failed_round_2`,
+  `injection_suspected_in_question`, `config_error`, `error`),
+- skip if no stage `.done` exists anywhere under `rounds/` (nothing has
+  progressed yet — council requires at least one stage to be cached before
+  resume is meaningful),
+- otherwise: resumable candidate.
+
+Show up to 4 most recent resumable candidates and ask the user via
+AskUserQuestion which to resume — or "Newest" to let council pick.
+
+If there are no resumable sessions, council will exit with code 1 ("no
 resumable session"). Report that and stop.
 
 ## Step 2: Launch council resume in Background
 
 Always pass `-v`. Always strip `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` so
-the spawned `claude -p` subprocess does not trip the nested-CLI guard.
+the spawned `claude -p` subprocess does not trip the nested-CLI guard. If the
+user supplied a session ID in `$ARGUMENTS`, pass it via `--session <id>`
+(never positionally — council will reject):
 
 ```bash
 mkdir -p .council

@@ -37,8 +37,11 @@ If neither file exists, the embedded fallback works but only uses `claude-code`.
 For the recommended three-CLI cohort (claude-code + codex + gemini), the user
 needs the per-host profile.
 
+Probe both candidate paths without erroring when either is missing:
+
 ```bash
-ls .council/default.yaml ~/.config/council/default.yaml
+test -f .council/default.yaml && echo "found: .council/default.yaml" || echo "missing: .council/default.yaml"
+test -f ~/.config/council/default.yaml && echo "found: ~/.config/council/default.yaml" || echo "missing: ~/.config/council/default.yaml"
 ```
 
 If both are missing and the user wants the multi-CLI default, suggest running
