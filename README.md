@@ -33,7 +33,11 @@ See [ADR-0010](docs/adr/0010-web-tools-for-experts.md), [ADR-0011](docs/adr/0011
 
 ## Install
 
-Requires Go 1.25+ (as declared in `go.mod`) and a working `claude` CLI on `$PATH` (Claude Code subscription).
+Requires Go 1.25+ (as declared in `go.mod`).
+
+v3 fans the debate across three vendor CLIs (Anthropic / OpenAI / Google) so the cohort has true cross-model heterogeneity instead of three samples of one distribution. You only need *one* of them on `$PATH` to run, but the shipped default profile and quorum (2-of-3) assume all three. See [ADR-0012](docs/adr/0012-multi-cli-executors.md) and [`docs/design/v3-multi-cli.md`](docs/design/v3-multi-cli.md).
+
+Install council itself:
 
 ```
 go install github.com/fitz123/council/cmd/council@latest
@@ -47,7 +51,24 @@ cd council
 go build -o council ./cmd/council
 ```
 
-The result is a single binary with no runtime dependencies beyond `claude`.
+Install the CLI vendors (each is subscription-based — no API keys):
+
+| Executor      | Binary   | Install                                                 | Auth                                  |
+|---------------|----------|---------------------------------------------------------|---------------------------------------|
+| `claude-code` | `claude` | See [Claude Code docs](https://docs.claude.com/claude-code) | `claude /login`                       |
+| `codex`       | `codex`  | `brew install codex` (or per-platform release)          | `codex login`                         |
+| `gemini-cli`  | `gemini` | `brew install gemini-cli` (or per-platform release)     | run `gemini` once → OAuth browser flow |
+
+After at least one CLI is authed, generate the per-host profile:
+
+```
+council init           # writes ~/.config/council/default.yaml
+council init --force   # regenerate after adding/removing a CLI
+```
+
+`council init` registers each executor, runs `exec.LookPath` to confirm the binary is installed, and live-probes ("respond with the word OK", 30s timeout) to confirm auth is set up. Verified CLIs appear in the generated profile; skipped CLIs are reported with a reason. Quorum scales as `min(2, len(verified))`. Zero verified → exit non-zero with an "install at least one of …" message.
+
+The shipped embedded default (compiled into the binary) stays claude-only as a safe fallback. The three-CLI profile lands at the per-host config path written by `init`.
 
 ## Usage
 
@@ -143,6 +164,7 @@ Transcripts always land in the session folder, regardless of `-v`.
 | 0    | Success — winner's R2 body printed to stdout, `verdict.json` written.              |
 | 1    | Config / validation error, injection suspected in question, or no resumable session. |
 | 2    | Quorum not met (R1 or R2), or no consensus (ballots tied).                         |
+| 6    | Rate-limit quorum failure — quorum unmet because ≥1 vendor was rate-limited; per-CLI help footer printed to stderr (see [ADR-0013](docs/adr/0013-no-runner-ratelimit-retries.md)). |
 | 130  | Interrupted by SIGINT/SIGTERM. Partial `verdict.json` is written; no root `.done`. |
 
 ## Deployment constraint — do not nest
@@ -168,8 +190,9 @@ A `council gc` subcommand is on the roadmap.
 
 - [`docs/design/v2.md`](docs/design/v2.md) — current debate-engine spec.
 - [`docs/design/v2-web-tools.md`](docs/design/v2-web-tools.md) — web-tools supplement (R1/R2 tools, token + latency envelope, audit recipe).
+- [`docs/design/v3-multi-cli.md`](docs/design/v3-multi-cli.md) — multi-CLI supplement (codex + gemini executors, `council init`, exit code 6, rate-limit policy).
 - [`docs/design/v1.md`](docs/design/v1.md) — MVP spec (superseded by v2 for the run loop; still useful for file-artifact and CLI-shape invariants).
-- [`docs/adr/`](docs/adr/) — architectural decision records (0008 for debate rounds + injection, 0010 for expert web tools, 0011 for nonce-every-fence).
+- [`docs/adr/`](docs/adr/) — architectural decision records (0008 for debate rounds + injection, 0010 for expert web tools, 0011 for nonce-every-fence, 0012 for multi-CLI executors, 0013 for runner-side rate-limit retry removal).
 - [`docs/architect-review.md`](docs/architect-review.md) — systems-architect methodology review of the spec.
 
 ## License
