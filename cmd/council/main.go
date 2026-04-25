@@ -187,6 +187,7 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 
 	if verbose {
 		logEnd(stderr, sess, v)
+		logArtifacts(stderr, sess, v)
 	}
 
 	switch {
@@ -487,6 +488,42 @@ func logEnd(w io.Writer, sess *session.Session, v *session.Verdict) {
 	}
 	fmt.Fprintf(w, "[%s] session %s: %.1fs total\n", ts, v.Status, v.DurationSeconds)
 	fmt.Fprintf(w, "[%s] session folder: %s\n", ts, sess.Path)
+}
+
+// logArtifacts dumps each expert's round output and the ballot table to w
+// after the timing summary. Lets a verbose run answer "who said what and
+// who voted for whom" without having to open files in the session folder.
+// Skipped silently if the verdict is missing rounds (orchestrator failed
+// before R1 finished) or if a per-expert output.md is unreadable.
+func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
+	if v == nil || sess == nil {
+		return
+	}
+	for idx, r := range v.Rounds {
+		for _, e := range r.Experts {
+			path := filepath.Join(sess.Path, "rounds", fmt.Sprintf("%d", idx+1), "experts", e.Label, "output.md")
+			body, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "\n=== round %d expert %s (%s) ===\n", idx+1, e.Label, e.RealName)
+			fmt.Fprintln(w, strings.TrimRight(string(body), "\n"))
+		}
+	}
+	if v.Voting != nil && len(v.Voting.Ballots) > 0 {
+		realName := make(map[string]string, len(v.Experts))
+		for _, e := range v.Experts {
+			realName[e.Label] = e.RealName
+		}
+		fmt.Fprintln(w, "\n=== ballots ===")
+		for _, b := range v.Voting.Ballots {
+			vote := b.VotedFor
+			if vote == "" {
+				vote = "(no vote)"
+			}
+			fmt.Fprintf(w, "  %s (%s) -> %s\n", b.VoterLabel, realName[b.VoterLabel], vote)
+		}
+	}
 }
 
 // displaySource renders the config source for the verbose preamble. The
