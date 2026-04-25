@@ -12,7 +12,8 @@ import (
 // only exercise lookup behavior.
 type stubExec struct{ name string }
 
-func (s stubExec) Name() string { return s.name }
+func (s stubExec) Name() string       { return s.name }
+func (s stubExec) BinaryName() string { return s.name }
 func (s stubExec) Execute(ctx context.Context, req Request) (Response, error) {
 	return Response{}, nil
 }

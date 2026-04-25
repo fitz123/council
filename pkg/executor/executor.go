@@ -19,23 +19,34 @@ import (
 )
 
 // Executor is implemented by every backend CLI. Name is the stable token
-// users put in profile YAML (`executor: claude-code`). Execute spawns one
-// invocation and writes its stdout/stderr to the files named in req; it
-// must not retry, must not delete the stderr file, and must not emit any
-// log of its own — those concerns belong to pkg/runner and
-// pkg/orchestrator respectively. Implementations are expected to delegate
-// to pkg/runner.Run for the actual subprocess work.
+// users put in profile YAML (`executor: claude-code`). BinaryName is the
+// program name to look up on PATH for preflight checks — distinct from
+// Name because the registry key (`gemini-cli`) and the executable name
+// (`gemini`) need not match. Execute spawns one invocation and writes its
+// stdout/stderr to the files named in req; it must not retry, must not
+// delete the stderr file, and must not emit any log of its own — those
+// concerns belong to pkg/runner and pkg/orchestrator respectively.
+// Implementations are expected to delegate to pkg/runner.Run for the
+// actual subprocess work.
+//
+// AllowedTools/PermissionMode on Request are translated to native
+// flag-shapes per executor (claude-code: --allowedTools/--permission-mode;
+// codex: -c tools.web_search=true; gemini-cli: --policy <toml>). Each
+// executor owns its translation; the orchestrator passes the abstract
+// fields verbatim.
 type Executor interface {
 	Name() string
+	BinaryName() string
 	Execute(ctx context.Context, req Request) (Response, error)
 }
 
 // Request describes one Execute call. Field-for-field with design §7.
 //
 // Prompt is piped to the subprocess on stdin in full. Model is the
-// vendor-agnostic short name ("haiku" / "sonnet" / "opus"); each
-// Executor implementation maps it to the CLI-side flag value (see
-// ClaudeCode.MapModel for the v1 mapping, which is identity).
+// literal CLI `--model` flag value, verbatim. Each executor's MapModel
+// is identity by default; the field is kept on the type so a future
+// model release can add per-vendor translation without changing
+// callers.
 //
 // MaxRetries is the profile's max_retries value, passed through so the
 // executor can size its rate-limit retry budget per design/v1.md §10's

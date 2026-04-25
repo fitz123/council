@@ -28,7 +28,8 @@ type stubExec struct {
 	calls    int64
 }
 
-func (s *stubExec) Name() string { return s.name }
+func (s *stubExec) Name() string       { return s.name }
+func (s *stubExec) BinaryName() string { return s.name }
 func (s *stubExec) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	atomic.AddInt64(&s.calls, 1)
 	p := filepath.ToSlash(req.StdoutFile)
@@ -413,7 +414,8 @@ type interruptibleStub struct {
 	started chan struct{}
 }
 
-func (s *interruptibleStub) Name() string { return s.name }
+func (s *interruptibleStub) Name() string       { return s.name }
+func (s *interruptibleStub) BinaryName() string { return s.name }
 func (s *interruptibleStub) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	select {
 	case s.started <- struct{}{}:

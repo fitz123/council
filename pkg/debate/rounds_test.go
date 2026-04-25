@@ -27,7 +27,8 @@ type testExec struct {
 	attempts map[string]int
 }
 
-func (t *testExec) Name() string { return t.name }
+func (t *testExec) Name() string       { return t.name }
+func (t *testExec) BinaryName() string { return t.name }
 
 func (t *testExec) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	t.mu.Lock()

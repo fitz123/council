@@ -200,6 +200,22 @@ func TestNameIsStable(t *testing.T) {
 	}
 }
 
+func TestBinaryNameIsClaude(t *testing.T) {
+	// Preflight (cmd/council/preflight.go) does exec.LookPath against
+	// BinaryName(). The registry key (`claude-code`) is not a valid
+	// binary name — the actual executable is `claude`. The test-only
+	// Binary override on the struct is irrelevant to the preflight
+	// contract: BinaryName must always return "claude".
+	c := &ClaudeCode{}
+	if got := c.BinaryName(); got != "claude" {
+		t.Errorf("BinaryName() = %q, want claude", got)
+	}
+	cWithOverride := &ClaudeCode{Binary: "/tmp/stub"}
+	if got := cWithOverride.BinaryName(); got != "claude" {
+		t.Errorf("BinaryName() with override Binary = %q, want claude", got)
+	}
+}
+
 func TestInitRegistersClaudeCode(t *testing.T) {
 	// importing this package must register "claude-code" via init().
 	got, err := executor.Get("claude-code")

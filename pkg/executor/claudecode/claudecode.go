@@ -50,6 +50,11 @@ func init() {
 // it is a breaking change to every existing profile YAML.
 func (c *ClaudeCode) Name() string { return "claude-code" }
 
+// BinaryName returns the program name to look up on PATH for preflight.
+// Constant "claude" — c.Binary is a test-only override and not the
+// preflight contract.
+func (c *ClaudeCode) BinaryName() string { return "claude" }
+
 // MapModel translates the vendor-agnostic short name from profile YAML
 // to the value the CLI's --model flag expects. v1 mapping is identity
 // (haiku/sonnet/opus pass through unchanged); it lives on the type

@@ -26,7 +26,8 @@ type stubExec struct {
 	on        func(ctx context.Context, call int64, req executor.Request) (executor.Response, error)
 }
 
-func (s *stubExec) Name() string { return s.name }
+func (s *stubExec) Name() string       { return s.name }
+func (s *stubExec) BinaryName() string { return s.name }
 func (s *stubExec) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	n := atomic.AddInt64(&s.callCount, 1)
 	return s.on(ctx, n, req)

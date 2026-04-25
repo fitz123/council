@@ -55,6 +55,21 @@ func withEnv(t *testing.T, key, val string) {
 	})
 }
 
+func TestMock_NameAndBinaryName(t *testing.T) {
+	// Mock must mirror ClaudeCode's identity so `-tags testbinary` smoke
+	// builds keep routing the default profile's `executor: claude-code`
+	// to the mock, AND keep preflight's exec.LookPath resolving to a real
+	// `claude` binary on PATH. BinaryName != "mock" is load-bearing — see
+	// the preflight contract in cmd/council/preflight.go.
+	m := &Mock{}
+	if got := m.Name(); got != "claude-code" {
+		t.Errorf("Name() = %q, want claude-code", got)
+	}
+	if got := m.BinaryName(); got != "claude" {
+		t.Errorf("BinaryName() = %q, want claude", got)
+	}
+}
+
 func TestMock_TrivialDefault(t *testing.T) {
 	withEnv(t, EnvName, "")
 	req := makeReq(t, "trivial-default")
