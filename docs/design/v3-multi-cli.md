@@ -14,9 +14,12 @@ claudecode's structure. `Executor` gains `BinaryName() string`.
 Every executor translates webfetch's `AllowedTools` /
 `PermissionMode` to its native flag surface. Claude unchanged;
 codex adds `-c tools.web_search=true` when web tools requested;
-gemini writes a Policy Engine TOML to its per-call ephemeral
-`GEMINI_CLI_HOME` and passes `--policy <file>` (forward-compatible
-replacement for deprecated `--allowed-tools`/`--yolo`).
+gemini writes a Policy Engine TOML to a per-call ephemeral tmp
+dir and passes `--policy <file>` (forward-compatible replacement
+for deprecated `--allowed-tools`/`--yolo`). The executor does NOT
+set `GEMINI_CLI_HOME` — gemini-cli treats it as the parent of
+`.gemini/` (where OAuth creds live), so redirecting it to a fresh
+dir would mask the user's `~/.gemini/oauth_creds.json`.
 
 ### 1.2 Default profile (written by `council init`)
 
@@ -127,12 +130,13 @@ Rate-limit markers + HelpCmd per ADR-0012.
 
 argv assembly (PermissionMode == bypassPermissions):
 ```
-gemini -m <model> -o text --policy $GEMINI_CLI_HOME/policy.toml
+gemini -m <model> -o text --policy <ephemeral-tmpdir>/policy.toml
 ```
 (stdin-piped prompt; no `-p`.)
 
-Executor writes a 4-line policy TOML at `$GEMINI_CLI_HOME/policy.toml`
-before invoking gemini. Policy body (embedded in the executor):
+Executor writes a 4-line policy TOML at `<ephemeral-tmpdir>/policy.toml`
+(per-call `os.MkdirTemp` + `defer os.RemoveAll`) before invoking
+gemini. Policy body (embedded in the executor):
 
 ```toml
 [[rule]]

@@ -80,14 +80,20 @@ const timestampLayout = time.RFC3339
 // nonce baked into profile.snapshot.yaml.
 func Run(ctx context.Context, profile *config.Profile, question string, sess *session.Session) (*session.Verdict, error) {
 	// On resume, an "interrupted" verdict.json from the previous attempt
-	// carries the original run's started_at. Preserve it so duration_seconds
-	// reflects total wall-clock from session creation to final resolution
-	// rather than just the final resume segment. Parse errors / absence fall
-	// back to time.Now() — the common case is a fresh run with no prior
-	// verdict.
+	// carries the original run's started_at AND its rate_limits[]. Preserve
+	// both: started_at so duration_seconds reflects total wall-clock from
+	// session creation to final resolution; rate_limits so the audit trail
+	// (F33/F35) survives a resume boundary — re-running a round on resume
+	// short-circuits via .done/.failed/.carried markers without restoring
+	// in-memory LimitErr, so collectRoundLimits would otherwise produce an
+	// empty slice and the prior rate-limit entries would be lost. Parse
+	// errors / absence fall back to time.Now() with no prior limits — the
+	// common case is a fresh run with no prior verdict.
 	startedAt := time.Now().UTC()
-	if prior, ok := readInterruptedStartedAt(sess.Path); ok {
+	var priorLimits []session.RateLimitEntry
+	if prior, limits, ok := readInterruptedVerdictState(sess.Path); ok {
 		startedAt = prior
+		priorLimits = limits
 	}
 	v := &session.Verdict{
 		Version:     2,
@@ -96,6 +102,7 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 		Profile:     profile.Name,
 		Question:    question,
 		StartedAt:   startedAt.Format(timestampLayout),
+		RateLimits:  priorLimits,
 	}
 
 	// Stage 1: sanity-scan the operator question for fence-shaped lines.
@@ -264,34 +271,38 @@ func finalizeInterrupted(v *session.Verdict, sess *session.Session, startedAt ti
 	return v, ErrInterrupted
 }
 
-// readInterruptedStartedAt recovers the original run's started_at from a
-// prior interrupted verdict.json in the session folder, used by resume to
-// preserve total wall-clock duration across the interrupt boundary. Only
-// verdicts with status="interrupted" are honoured — any other status means
-// the session is final (resume would refuse it) or the verdict is a prior
-// resume's own output being overwritten. Missing / unparseable / non-
-// interrupted verdicts return ok=false and the caller falls back to
-// time.Now(), preserving the fresh-run behaviour.
-func readInterruptedStartedAt(sessionPath string) (time.Time, bool) {
+// readInterruptedVerdictState recovers state from a prior interrupted
+// verdict.json that the resume path needs to thread into the new run:
+// the original started_at (for total wall-clock duration) and the prior
+// rate_limits[] (so the audit trail survives — round runners short-
+// circuit completed stages without restoring in-memory LimitErr, so
+// collectRoundLimits would drop these entries). Only verdicts with
+// status="interrupted" are honoured — any other status means the session
+// is final (resume would refuse it) or the verdict is a prior resume's
+// own output being overwritten. Missing / unparseable / non-interrupted
+// verdicts return ok=false and the caller falls back to time.Now() with
+// no prior limits, preserving the fresh-run behaviour.
+func readInterruptedVerdictState(sessionPath string) (time.Time, []session.RateLimitEntry, bool) {
 	data, err := os.ReadFile(filepath.Join(sessionPath, "verdict.json"))
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, nil, false
 	}
 	var v struct {
-		Status    string `json:"status"`
-		StartedAt string `json:"started_at"`
+		Status     string                   `json:"status"`
+		StartedAt  string                   `json:"started_at"`
+		RateLimits []session.RateLimitEntry `json:"rate_limits"`
 	}
 	if err := json.Unmarshal(data, &v); err != nil {
-		return time.Time{}, false
+		return time.Time{}, nil, false
 	}
 	if v.Status != "interrupted" || v.StartedAt == "" {
-		return time.Time{}, false
+		return time.Time{}, nil, false
 	}
 	t, err := time.Parse(timestampLayout, v.StartedAt)
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, nil, false
 	}
-	return t.UTC(), true
+	return t.UTC(), v.RateLimits, true
 }
 
 // finalize sets the end-timestamp and duration fields on v using the clock

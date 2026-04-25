@@ -542,6 +542,51 @@ func TestRun_ResumePreservesStartedAt(t *testing.T) {
 	}
 }
 
+// TestRun_ResumePreservesPriorRateLimits — a prior interrupted verdict.json
+// carries rate_limits[] entries from rate-limited experts whose failures
+// were absorbed by quorum. On resume, those experts short-circuit via
+// .failed (R1) or .done+.carried (R2) markers, so the in-memory LimitErr
+// is not restored and collectRoundLimits returns nothing for them. Without
+// preserving the prior entries, the audit trail promised by F33/F35 would
+// disappear across the resume boundary. Run must seed v.RateLimits from
+// the prior verdict so the final emit includes them.
+func TestRun_ResumePreservesPriorRateLimits(t *testing.T) {
+	register(t, &stubExec{name: "stub", on: writeOK("ok")})
+	p := newV2TestProfile("stub", []string{"a", "b"})
+	s := newV2Session(t, p, "q")
+
+	priorStart := "2020-01-02T03:04:05Z"
+	priorJSON := `{
+		"version": 2,
+		"status": "interrupted",
+		"started_at": "` + priorStart + `",
+		"rate_limits": [
+			{"executor": "gemini-cli", "pattern": "RESOURCE_EXHAUSTED", "help_cmd": "check https://aistudio.google.com/apikey for quota and billing", "round": 1, "expert": "A"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(s.Path, "verdict.json"), []byte(priorJSON), 0o644); err != nil {
+		t.Fatalf("seed verdict.json: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	v, err := Run(ctx, p, "q", s)
+	if !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("err = %v, want ErrInterrupted", err)
+	}
+	if len(v.RateLimits) != 1 {
+		t.Fatalf("len(RateLimits) = %d, want 1 (prior entry preserved across resume)", len(v.RateLimits))
+	}
+	got := v.RateLimits[0]
+	if got.Executor != "gemini-cli" || got.Pattern != "RESOURCE_EXHAUSTED" || got.Round != 1 || got.Expert != "A" {
+		t.Errorf("preserved entry mismatch: %+v", got)
+	}
+	body := readVerdict(t, s)
+	if !strings.Contains(body, `"pattern": "RESOURCE_EXHAUSTED"`) {
+		t.Errorf("verdict.json missing preserved rate_limit entry: %s", body)
+	}
+}
+
 // TestRun_FreshRunIgnoresNonInterruptedPriorVerdict — if verdict.json is
 // present but its status is not "interrupted" (e.g. stale "ok" from a
 // session directory the operator has reused), Run must use time.Now()

@@ -5,15 +5,20 @@
 //
 // Translation contract (ADR-0012):
 //   - PermissionMode == "bypassPermissions" → executor writes the
-//     embedded geminiPolicyTOML to $GEMINI_CLI_HOME/policy.toml and
+//     embedded geminiPolicyTOML to a fresh ephemeral tmp dir and
 //     appends `--policy <that path>` to argv. Empty PermissionMode →
 //     no policy file, no `--policy` flag (gemini's default-deny on
 //     web_fetch in headless applies; ballot invariant).
 //   - AllowedTools is irrelevant for gemini — the policy TOML allows
 //     google_web_search + web_fetch when bypassPermissions is set, so
 //     the per-tool list does not need separate translation.
-//   - Each call gets a fresh ephemeral $GEMINI_CLI_HOME (MkdirTemp +
-//     defer RemoveAll) for no-session-persistence parity.
+//
+// We do NOT set $GEMINI_CLI_HOME: gemini-cli treats GEMINI_CLI_HOME as
+// the parent of `.gemini/` (where OAuth creds live), so redirecting it
+// to a fresh dir would mask the user's `~/.gemini/oauth_creds.json` and
+// fail every call with "Please set an Auth method". gemini's headless
+// `-p` mode is already stateless enough for our purposes; only the
+// policy file needs an ephemeral home.
 //
 // `--yolo` and `--allowed-tools` are deprecated in gemini-cli 0.38.2
 // and slated for removal in 1.0; the Policy Engine (`--policy <file>`)
@@ -37,7 +42,7 @@ import (
 	"github.com/fitz123/council/pkg/runner"
 )
 
-// geminiPolicyTOML is the body written to $GEMINI_CLI_HOME/policy.toml
+// geminiPolicyTOML is the body written to <ephemeral>/policy.toml
 // when PermissionMode == bypassPermissions. Allows the two web tools
 // gemini's headless mode would otherwise default-deny. Schema source:
 // gemini-cli docs/core/policy-engine. Stable enough to embed inline;
@@ -100,10 +105,11 @@ func (g *Gemini) binary() string {
 // scanned for geminiLimitPatterns; on match the error is wrapped into
 // *runner.LimitError.
 //
-// A fresh ephemeral $GEMINI_CLI_HOME is created per call and removed
-// on return. RemoveAll fires after runner.Run blocks on cmd.Wait, so
-// any gemini atexit file-writes have completed by the time we tear it
-// down — the subprocess wait is load-bearing here.
+// When PermissionMode == bypassPermissions a fresh tmp dir is created
+// per call, policy.toml is written into it, and the dir is removed on
+// return. RemoveAll fires after runner.Run blocks on cmd.Wait, so the
+// subprocess has finished reading the policy by the time we tear it
+// down. The user's `~/.gemini/` (OAuth creds, settings) is not touched.
 func (g *Gemini) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	if req.Model == "" {
 		return executor.Response{}, errors.New("gemini: empty Model")
@@ -115,38 +121,32 @@ func (g *Gemini) Execute(ctx context.Context, req executor.Request) (executor.Re
 		return executor.Response{}, fmt.Errorf("gemini: Timeout must be positive, got %s", req.Timeout)
 	}
 
-	tmpHome, err := os.MkdirTemp("", "gemini-home-*")
-	if err != nil {
-		return executor.Response{}, fmt.Errorf("gemini: mkdir temp home: %w", err)
-	}
-	defer os.RemoveAll(tmpHome)
-
 	argv := []string{
 		g.binary(),
 		"-m", g.MapModel(req.Model),
 		"-o", "text",
 	}
 	// Translation: bypassPermissions is the webfetch expert-path
-	// signal. Write the embedded policy TOML and pass --policy. Empty
-	// PermissionMode emits nothing; gemini's default-deny on web_fetch
-	// in headless applies (ballot invariant).
+	// signal. Write the embedded policy TOML to a fresh tmp dir and
+	// pass --policy. Empty PermissionMode emits nothing; gemini's
+	// default-deny on web_fetch in headless applies (ballot
+	// invariant).
 	if req.PermissionMode == "bypassPermissions" {
-		policyPath := filepath.Join(tmpHome, "policy.toml")
+		tmpDir, err := os.MkdirTemp("", "gemini-policy-*")
+		if err != nil {
+			return executor.Response{}, fmt.Errorf("gemini: mkdir temp: %w", err)
+		}
+		defer os.RemoveAll(tmpDir)
+		policyPath := filepath.Join(tmpDir, "policy.toml")
 		if writeErr := os.WriteFile(policyPath, []byte(geminiPolicyTOML), 0o600); writeErr != nil {
 			return executor.Response{}, fmt.Errorf("gemini: write policy: %w", writeErr)
 		}
 		argv = append(argv, "--policy", policyPath)
 	}
 
-	// GEMINI_CLI_HOME redirects gemini's session-state, OAuth cache
-	// reads, and atexit writes into the ephemeral dir for this call so
-	// subsequent invocations stay independent.
-	env := append(os.Environ(), "GEMINI_CLI_HOME="+tmpHome)
-
 	resp, err := runner.Run(ctx, runner.RunRequest{
 		Argv:       argv,
 		Prompt:     req.Prompt,
-		Env:        env,
 		StdoutFile: req.StdoutFile,
 		StderrFile: req.StderrFile,
 		Timeout:    req.Timeout,

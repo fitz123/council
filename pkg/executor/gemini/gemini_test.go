@@ -14,21 +14,27 @@ import (
 )
 
 // writeStub drops a POSIX-shell stub at t.TempDir/stub-gemini.sh that
-// echoes its argv + GEMINI_CLI_HOME, snapshots the policy file (if
-// present) to $COUNCIL_TEST_POLICY_SNAPSHOT before exiting, and
-// returns 0. Echoing the env var lets the test recover the ephemeral
-// home path after Execute returns; snapshotting the policy file
-// sidesteps the defer os.RemoveAll race (the parent's cleanup fires
-// before the test can stat the file).
+// echoes its argv, snapshots the file passed via --policy (if any) to
+// $COUNCIL_TEST_POLICY_SNAPSHOT before exiting, and returns 0.
+// Snapshotting sidesteps the defer os.RemoveAll race where the parent's
+// cleanup fires before the test can stat the original.
 func writeStub(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stub-gemini.sh")
 	body := `#!/bin/sh
 echo "ARGV: $*"
-echo "GEMINI_CLI_HOME: $GEMINI_CLI_HOME"
-if [ -n "$COUNCIL_TEST_POLICY_SNAPSHOT" ] && [ -f "$GEMINI_CLI_HOME/policy.toml" ]; then
-  cp "$GEMINI_CLI_HOME/policy.toml" "$COUNCIL_TEST_POLICY_SNAPSHOT"
+policy=""
+prev=""
+for tok in "$@"; do
+  if [ "$prev" = "--policy" ]; then
+    policy="$tok"
+    break
+  fi
+  prev="$tok"
+done
+if [ -n "$COUNCIL_TEST_POLICY_SNAPSHOT" ] && [ -n "$policy" ] && [ -f "$policy" ]; then
+  cp "$policy" "$COUNCIL_TEST_POLICY_SNAPSHOT"
 fi
 `
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
@@ -53,19 +59,16 @@ func readArgvTokens(t *testing.T, stdoutPath string) []string {
 	return nil
 }
 
-// readGeminiHome returns the GEMINI_CLI_HOME path the stub recorded.
-func readGeminiHome(t *testing.T, stdoutPath string) string {
+// readPolicyPath returns the value following --policy in the recorded
+// argv, or "" if the flag is absent.
+func readPolicyPath(t *testing.T, stdoutPath string) string {
 	t.Helper()
-	data, err := os.ReadFile(stdoutPath)
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "GEMINI_CLI_HOME: ") {
-			return strings.TrimPrefix(line, "GEMINI_CLI_HOME: ")
+	tokens := readArgvTokens(t, stdoutPath)
+	for i := 0; i < len(tokens)-1; i++ {
+		if tokens[i] == "--policy" {
+			return tokens[i+1]
 		}
 	}
-	t.Fatalf("GEMINI_CLI_HOME line not found in stdout: %q", string(data))
 	return ""
 }
 
@@ -162,7 +165,6 @@ func TestExecuteHappyPathNoTools(t *testing.T) {
 // TestExecuteWritesPolicyOnBypass verifies that when
 // PermissionMode=bypassPermissions:
 //   - argv contains --policy <path> as two consecutive tokens
-//   - the path argument lives under GEMINI_CLI_HOME
 //   - policy.toml at that path matches geminiPolicyTOML byte-for-byte
 //     (verified via snapshot — defer os.RemoveAll fires before test
 //     can stat the original)
@@ -188,24 +190,12 @@ func TestExecuteWritesPolicyOnBypass(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	tokens := readArgvTokens(t, out)
-	home := readGeminiHome(t, out)
-	if home == "" {
-		t.Fatal("stub did not record GEMINI_CLI_HOME")
+	policyPath := readPolicyPath(t, out)
+	if policyPath == "" {
+		t.Fatalf("argv missing --policy <path>\nargv: %v", readArgvTokens(t, out))
 	}
-
-	// --policy <path> must appear as two consecutive tokens; <path> must
-	// be exactly $GEMINI_CLI_HOME/policy.toml.
-	wantPolicyPath := filepath.Join(home, "policy.toml")
-	found := false
-	for i := 0; i < len(tokens)-1; i++ {
-		if tokens[i] == "--policy" && tokens[i+1] == wantPolicyPath {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("argv missing consecutive `--policy %s`\ngot: %v", wantPolicyPath, tokens)
+	if filepath.Base(policyPath) != "policy.toml" {
+		t.Errorf("--policy basename = %q, want policy.toml", filepath.Base(policyPath))
 	}
 
 	// Policy snapshot must equal embedded geminiPolicyTOML byte-for-byte.
@@ -218,9 +208,9 @@ func TestExecuteWritesPolicyOnBypass(t *testing.T) {
 	}
 }
 
-// TestExecuteRemovesEphemeralHome verifies the ephemeral GEMINI_CLI_HOME
-// directory is gone after Execute returns (defer os.RemoveAll runs).
-func TestExecuteRemovesEphemeralHome(t *testing.T) {
+// TestExecuteRemovesPolicyDir verifies the ephemeral policy directory
+// is gone after Execute returns (defer os.RemoveAll runs).
+func TestExecuteRemovesPolicyDir(t *testing.T) {
 	stub := writeStub(t)
 	g := &Gemini{Binary: stub}
 
@@ -240,19 +230,20 @@ func TestExecuteRemovesEphemeralHome(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	home := readGeminiHome(t, out)
-	if home == "" {
-		t.Fatal("stub did not record GEMINI_CLI_HOME")
+	policyPath := readPolicyPath(t, out)
+	if policyPath == "" {
+		t.Fatal("stub did not record --policy path")
 	}
-	if _, err := os.Stat(home); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("GEMINI_CLI_HOME %q still exists after Execute (stat err: %v)", home, err)
+	policyDir := filepath.Dir(policyPath)
+	if _, err := os.Stat(policyDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("policy dir %q still exists after Execute (stat err: %v)", policyDir, err)
 	}
 }
 
-// TestExecuteFreshHomePerCall verifies two consecutive Execute calls
-// produce distinct GEMINI_CLI_HOME paths — the home is scoped to one
-// invocation, not memoized.
-func TestExecuteFreshHomePerCall(t *testing.T) {
+// TestExecuteFreshPolicyDirPerCall verifies two consecutive Execute
+// calls with bypassPermissions produce distinct policy dir paths — the
+// dir is scoped to one invocation, not memoized.
+func TestExecuteFreshPolicyDirPerCall(t *testing.T) {
 	stub := writeStub(t)
 	g := &Gemini{Binary: stub}
 
@@ -263,24 +254,65 @@ func TestExecuteFreshHomePerCall(t *testing.T) {
 
 	for _, out := range []string{out1, out2} {
 		_, err := g.Execute(context.Background(), executor.Request{
-			Prompt:     "x",
-			Model:      "gemini-3.1-pro-preview",
-			Timeout:    5 * time.Second,
-			StdoutFile: out,
-			StderrFile: errf,
+			Prompt:         "x",
+			Model:          "gemini-3.1-pro-preview",
+			Timeout:        5 * time.Second,
+			StdoutFile:     out,
+			StderrFile:     errf,
+			PermissionMode: "bypassPermissions",
 		})
 		if err != nil {
 			t.Fatalf("Execute (%s): %v", out, err)
 		}
 	}
 
-	home1 := readGeminiHome(t, out1)
-	home2 := readGeminiHome(t, out2)
-	if home1 == "" || home2 == "" {
-		t.Fatalf("missing GEMINI_CLI_HOME records: home1=%q home2=%q", home1, home2)
+	p1 := readPolicyPath(t, out1)
+	p2 := readPolicyPath(t, out2)
+	if p1 == "" || p2 == "" {
+		t.Fatalf("missing --policy records: p1=%q p2=%q", p1, p2)
 	}
-	if home1 == home2 {
-		t.Errorf("GEMINI_CLI_HOME reused across calls: %q", home1)
+	if filepath.Dir(p1) == filepath.Dir(p2) {
+		t.Errorf("policy dir reused across calls: %q", filepath.Dir(p1))
+	}
+}
+
+// TestExecuteDoesNotSetGeminiCliHome verifies the executor preserves
+// the ambient $GEMINI_CLI_HOME (or its absence) so gemini-cli reads
+// OAuth credentials from the user's real `~/.gemini/`. Setting
+// GEMINI_CLI_HOME to a fresh dir would mask `~/.gemini/oauth_creds.json`
+// and break authentication for OAuth users.
+func TestExecuteDoesNotSetGeminiCliHome(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "envprobe.sh")
+	body := `#!/bin/sh
+echo "GEMINI_CLI_HOME=${GEMINI_CLI_HOME-<unset>}"
+`
+	if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	g := &Gemini{Binary: stub}
+
+	out := filepath.Join(dir, "out")
+	errf := filepath.Join(dir, "err")
+	t.Setenv("GEMINI_CLI_HOME", "")
+	_ = os.Unsetenv("GEMINI_CLI_HOME")
+
+	_, err := g.Execute(context.Background(), executor.Request{
+		Prompt:     "x",
+		Model:      "gemini-3.1-pro-preview",
+		Timeout:    5 * time.Second,
+		StdoutFile: out,
+		StderrFile: errf,
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if !strings.Contains(string(data), "GEMINI_CLI_HOME=<unset>") {
+		t.Errorf("subprocess saw GEMINI_CLI_HOME set; executor must not redirect gemini's home dir.\nstdout: %q", string(data))
 	}
 }
 
