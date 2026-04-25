@@ -78,13 +78,21 @@ func (r *stderrReporter) renderRoundExpert(e debate.StageEvent) {
 			fmt.Fprintln(r.w, stripControlBytes(strings.TrimRight(string(e.Body), "\n")))
 		}
 	case "failed":
-		if e.LimitErr != nil {
+		switch {
+		case e.Resumed:
+			// Resumed from a .failed tombstone — the failure already
+			// streamed in the prior session. Show as a cache marker so
+			// the operator can reconstruct the cohort without a fake
+			// "FAILED in 0.0s" line that suggests a fresh failure.
+			fmt.Fprintf(r.w, "[%s] round %d expert %s (%s) reused failed marker from cache\n",
+				ts, e.Round, e.Label, e.RealName)
+		case e.LimitErr != nil:
 			fmt.Fprintf(r.w, "[%s] round %d expert %s (%s) FAILED in %.1fs: rate-limited (%s)\n",
 				ts, e.Round, e.Label, e.RealName, e.Duration.Seconds(), e.LimitErr.Pattern)
-			return
+		default:
+			fmt.Fprintf(r.w, "[%s] round %d expert %s (%s) FAILED in %.1fs\n",
+				ts, e.Round, e.Label, e.RealName, e.Duration.Seconds())
 		}
-		fmt.Fprintf(r.w, "[%s] round %d expert %s (%s) FAILED in %.1fs\n",
-			ts, e.Round, e.Label, e.RealName, e.Duration.Seconds())
 	}
 }
 
@@ -103,8 +111,8 @@ func (r *stderrReporter) renderBallot(e debate.StageEvent) {
 		fmt.Fprintf(r.w, "[%s] ballot %s (%s) discarded (rate-limited) in %.1fs\n",
 			ts, e.Label, e.RealName, e.Duration.Seconds())
 	default:
-		fmt.Fprintf(r.w, "[%s] ballot %s (%s) discarded (malformed) in %.1fs\n",
-			ts, e.Label, e.RealName, e.Duration.Seconds())
+		fmt.Fprintf(r.w, "[%s] ballot %s (%s) discarded (%s) in %.1fs\n",
+			ts, e.Label, e.RealName, ballotRejectedLabel(e.RejectedReason), e.Duration.Seconds())
 	}
 	fmt.Fprintf(r.w, "\n=== ballot %s (%s) ===\n", e.Label, e.RealName)
 	if len(e.Body) > 0 {
@@ -112,5 +120,25 @@ func (r *stderrReporter) renderBallot(e debate.StageEvent) {
 	}
 	if e.VotedFor == "" {
 		fmt.Fprintln(r.w, "(no vote — discarded)")
+	}
+}
+
+// ballotRejectedLabel maps a debate.BallotRejected* constant to the
+// short human-readable reason shown after "discarded (...)" in the live
+// stream. Empty / unknown reason falls back to "malformed" so a future
+// reason value that the renderer doesn't yet know about doesn't render
+// "discarded ()" with a stray empty-parens.
+func ballotRejectedLabel(reason string) string {
+	switch reason {
+	case debate.BallotRejectedSubprocessError:
+		return "subprocess error"
+	case debate.BallotRejectedReadError:
+		return "stdout read error"
+	case debate.BallotRejectedForgery:
+		return "forgery detected"
+	case debate.BallotRejectedInactiveLabel:
+		return "vote for inactive label"
+	default:
+		return "malformed"
 	}
 }

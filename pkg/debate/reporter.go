@@ -62,6 +62,12 @@ type StageEvent struct {
 	// for an inactive label).
 	VotedFor string
 
+	// RejectedReason discriminates ballot-discard paths (one of the
+	// debate.BallotRejected* constants). Empty for round-expert events
+	// and for successful ballots. Lets the renderer distinguish the
+	// failure modes that all otherwise show as "no vote".
+	RejectedReason string
+
 	// LimitErr is non-nil when the stage failed because of a vendor rate
 	// limit (ADR-0013). For round-expert + Participation == "failed" or
 	// for ballot + VotedFor == "" with LimitErr set, the renderer can
@@ -119,15 +125,16 @@ func reportRoundExpert(rep Reporter, round int, ex LabeledExpert, r *RoundOutput
 // callee can assume rep is always non-nil.
 func reportBallot(rep Reporter, ex LabeledExpert, b *Ballot, body []byte, resumed bool) {
 	rep.OnStageDone(StageEvent{
-		Kind:     "ballot",
-		Round:    0,
-		Label:    ex.Label,
-		RealName: ex.Role.Name,
-		Body:     body,
-		VotedFor: b.VotedFor,
-		LimitErr: b.LimitErr,
-		Duration: time.Duration(b.DurationSeconds * float64(time.Second)),
-		Retries:  b.Retries,
-		Resumed:  resumed,
+		Kind:           "ballot",
+		Round:          0,
+		Label:          ex.Label,
+		RealName:       ex.Role.Name,
+		Body:           body,
+		VotedFor:       b.VotedFor,
+		RejectedReason: b.RejectedReason,
+		LimitErr:       b.LimitErr,
+		Duration:       time.Duration(b.DurationSeconds * float64(time.Second)),
+		Retries:        b.Retries,
+		Resumed:        resumed,
 	})
 }

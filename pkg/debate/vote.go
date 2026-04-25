@@ -68,6 +68,12 @@ type BallotConfig struct {
 // (ADR-0013). Ballots run with AllowedTools=nil so this is rare in practice,
 // but the field is captured anyway so the orchestrator can include the entry
 // in verdict.json's rate_limits[] alongside any round-level rate-limit hits.
+//
+// RejectedReason carries the discriminator a discarded ballot's failure path
+// (one of the BallotRejected* constants below). Empty when VotedFor != "".
+// Surfaced by the live verbose reporter so the operator can tell "subprocess
+// failed" from "voted for inactive label" instead of seeing every discard
+// labeled "malformed".
 type Ballot struct {
 	VoterLabel      string
 	VotedFor        string
@@ -75,7 +81,20 @@ type Ballot struct {
 	Retries         int
 	DurationSeconds float64
 	LimitErr        *runner.LimitError
+	RejectedReason  string
 }
+
+// Discard reasons surfaced by runOneBallot. Kept as string constants so the
+// renderer (cmd/council) can switch on them without importing pkg/runner
+// for an enum, and so verdict.json could carry the value verbatim if a
+// future change adds it to VerdictBallot.
+const (
+	BallotRejectedSubprocessError = "subprocess_error" // exec failed, exited non-zero, retried out
+	BallotRejectedReadError       = "read_error"       // post-subprocess stdout read failed
+	BallotRejectedForgery         = "forgery"          // CheckForgery rejected the body (nonce-shaped fence detected)
+	BallotRejectedMalformed       = "malformed"        // parser couldn't extract exactly one VOTE: <letter>
+	BallotRejectedInactiveLabel   = "inactive_label"   // VOTE: <letter> for a label not in the active cohort
+)
 
 // TallyResult is the outcome of aggregating ballots. Exactly one of Winner
 // (non-empty) and TiedCandidates (non-nil, len >= 2, or len == |active| when
@@ -199,23 +218,32 @@ func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, quest
 		var le *runner.LimitError
 		if errors.As(err, &le) {
 			result.LimitErr = le
+		} else {
+			// Subprocess error is the only "non-rate-limited but failed
+			// to even produce output" path; tag it so the verbose stream
+			// can distinguish exec failures from malformed bodies.
+			result.RejectedReason = BallotRejectedSubprocessError
 		}
 		return result
 	}
 
 	body, rerr := os.ReadFile(stdoutPath)
 	if rerr != nil {
+		result.RejectedReason = BallotRejectedReadError
 		return result
 	}
 	reportBody = body
 	if ferr := prompt.CheckForgery(string(body), cfg.Nonce); ferr != nil {
+		result.RejectedReason = BallotRejectedForgery
 		return result
 	}
 	voted, ok := parseBallotVote(string(body))
 	if !ok {
+		result.RejectedReason = BallotRejectedMalformed
 		return result
 	}
 	if !active[voted] {
+		result.RejectedReason = BallotRejectedInactiveLabel
 		return result
 	}
 	_ = os.Remove(stderrPath)

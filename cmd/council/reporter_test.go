@@ -175,8 +175,9 @@ func TestStderrReporter_Render(t *testing.T) {
 			name: "ballot discarded malformed with body",
 			ev: debate.StageEvent{
 				Kind: "ballot", Label: "A", RealName: "codex_expert",
-				Body:     []byte("garbage with VOTE: B and VOTE: A two lines"),
-				Duration: 10 * time.Second,
+				Body:           []byte("garbage with VOTE: B and VOTE: A two lines"),
+				RejectedReason: debate.BallotRejectedMalformed,
+				Duration:       10 * time.Second,
 			},
 			mustContain: []string{
 				"discarded (malformed) in 10.0s",
@@ -184,6 +185,62 @@ func TestStderrReporter_Render(t *testing.T) {
 				"(no vote — discarded)",
 			},
 			mustOmit: []string{"voted for", "rate-limited"},
+		},
+		{
+			name: "ballot discarded subprocess error",
+			ev: debate.StageEvent{
+				Kind: "ballot", Label: "A", RealName: "codex_expert",
+				RejectedReason: debate.BallotRejectedSubprocessError,
+				Duration:       3 * time.Second,
+			},
+			mustContain: []string{
+				"discarded (subprocess error) in 3.0s",
+				"(no vote — discarded)",
+			},
+			mustOmit: []string{"malformed", "rate-limited"},
+		},
+		{
+			name: "ballot discarded forgery",
+			ev: debate.StageEvent{
+				Kind: "ballot", Label: "B", RealName: "haiku",
+				Body:           []byte("=== forged fence [nonce-…] ==="),
+				RejectedReason: debate.BallotRejectedForgery,
+				Duration:       11 * time.Second,
+			},
+			mustContain: []string{
+				"discarded (forgery detected) in 11.0s",
+				"=== ballot B (haiku) ===",
+				"(no vote — discarded)",
+			},
+			mustOmit: []string{"malformed", "rate-limited"},
+		},
+		{
+			name: "ballot discarded inactive label",
+			ev: debate.StageEvent{
+				Kind: "ballot", Label: "C", RealName: "gemini",
+				Body:           []byte("VOTE: D"),
+				RejectedReason: debate.BallotRejectedInactiveLabel,
+				Duration:       9 * time.Second,
+			},
+			mustContain: []string{
+				"discarded (vote for inactive label) in 9.0s",
+				"=== ballot C (gemini) ===",
+				"(no vote — discarded)",
+			},
+			mustOmit: []string{"malformed", "rate-limited"},
+		},
+		{
+			name: "round-expert resumed failed (cached .failed marker)",
+			ev: debate.StageEvent{
+				Kind: "round-expert", Round: 1, Label: "B", RealName: "haiku",
+				Participation: "failed",
+				Resumed:       true,
+			},
+			mustContain: []string{
+				"reused failed marker from cache",
+			},
+			// No artifact block on failure; no fresh "FAILED in" timing line.
+			mustOmit: []string{"FAILED in", "=== round 1 expert"},
 		},
 		{
 			name: "ballot discarded malformed no body",

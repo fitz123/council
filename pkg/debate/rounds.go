@@ -218,8 +218,11 @@ func runExpertR1(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 	// A .failed marker left by a prior attempt freezes the drop across
 	// resume — otherwise a previously-failed expert could be re-spawned,
 	// succeed, and land in a cohort whose other R2 .done outputs were built
-	// without it.
+	// without it. Mark resumed=true so the live verbose stream renders this
+	// as "reused failed marker from cache" rather than a fresh "FAILED in
+	// 0.0s" event — the failure already streamed in the prior session.
 	if _, err := os.Stat(filepath.Join(dir, ".failed")); err == nil {
+		resumed = true
 		return result
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -390,15 +393,19 @@ func runExpertR2(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 		Name:          ex.Role.Name,
 		Participation: "failed",
 	}
-	resumed := false
-	defer func() { reportRoundExpert(cfg.Reporter, 2, ex, &result, resumed) }()
 
 	// R1-dropped experts have no last-known-good to carry and are not
 	// invoked in R2. Caller uses the participation field to key the
-	// verdict entry; the remaining zero fields are harmless.
+	// verdict entry; the remaining zero fields are harmless. Return
+	// BEFORE the reporter defer is installed so the live verbose stream
+	// doesn't emit a duplicate "round 2 ... FAILED in 0.0s" line for an
+	// expert that already reported its R1 failure.
 	if r1Self == nil || r1Self.Participation != "ok" {
 		return result
 	}
+
+	resumed := false
+	defer func() { reportRoundExpert(cfg.Reporter, 2, ex, &result, resumed) }()
 
 	dir := cfg.Session.RoundExpertDir(2, ex.Label)
 	// Resume path (D14): reuse the prior run's finalized stage. A sibling
