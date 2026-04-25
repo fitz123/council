@@ -543,6 +543,31 @@ func TestResolveVersion(t *testing.T) {
 	}
 }
 
+func TestStripControlBytes(t *testing.T) {
+	// Pin the contract so a future logArtifacts edit can't silently
+	// reintroduce raw ANSI/OSC passthrough on stderr.
+	cases := []struct {
+		name, in, want string
+	}{
+		{"plain", "plain text", "plain text"},
+		{"newlines preserved", "line one\nline two\n", "line one\nline two\n"},
+		{"tabs preserved", "tab\there", "tab\there"},
+		{"cr preserved", "cr\rhere", "cr\rhere"},
+		{"esc replaced (ANSI clear-screen)", "esc\x1b[2Jhere", "esc�[2Jhere"},
+		{"bel replaced", "bell\x07after", "bell�after"},
+		{"null replaced", "null\x00byte", "null�byte"},
+		{"del replaced", "del\x7fbyte", "del�byte"},
+		{"unicode preserved", "café — 日本語", "café — 日本語"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stripControlBytes(c.in); got != c.want {
+				t.Errorf("stripControlBytes(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestDisplaySource(t *testing.T) {
 	cwd := t.TempDir()
 	sessPath := filepath.Join(cwd, ".council", "sessions", "sess-id")

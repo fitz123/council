@@ -177,6 +177,41 @@ func TestRunBallot_MultipleVoteLinesDiscarded(t *testing.T) {
 	}
 }
 
+func TestRunBallot_WhitespaceVoteDiscarded(t *testing.T) {
+	// The parser at vote.go:28 is line-anchored ((?m)^VOTE: ([A-Z])\r?$),
+	// so any horizontal whitespace before VOTE: or after the letter prevents
+	// a match and the ballot is discarded. The ballot prompt explicitly
+	// instructs voters to write the VOTE line flush-left with no trailing
+	// whitespace; this test pins the contract so a future prompt edit that
+	// reintroduces an indented example would be caught here, not in
+	// production where every voter losing its ballot collapses quorum.
+	exec := &testExec{
+		name: testExecName,
+		fn: func(ctx context.Context, req executor.Request, _ int) (string, error) {
+			label := strings.TrimSuffix(filepath.Base(req.StdoutFile), ".txt")
+			switch label {
+			case "A":
+				return "  VOTE: A\n", nil // leading spaces
+			case "B":
+				return "VOTE: B \n", nil // trailing space
+			case "C":
+				return "\tVOTE: C\n", nil // leading tab
+			}
+			return "VOTE: A\n", nil
+		},
+	}
+	cfg, _ := setupBallotTest(t, "5555666677778888", exec)
+	ballots, err := RunBallot(context.Background(), cfg, "q?", "agg")
+	if err != nil {
+		t.Fatalf("RunBallot: %v", err)
+	}
+	for _, b := range ballots {
+		if b.VotedFor != "" {
+			t.Errorf("voter %s VotedFor = %q, want discarded (whitespace must not be tolerated)", b.VoterLabel, b.VotedFor)
+		}
+	}
+}
+
 func TestRunBallot_VoteForInactiveLabelDiscarded(t *testing.T) {
 	// Voter A votes for D — not in the active set (only A/B/C). Discarded.
 	exec := &testExec{

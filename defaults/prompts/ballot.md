@@ -20,15 +20,23 @@ Hard rules:
 - Summarize peer claims in your own words; do not quote raw lines from the
   candidate answers.
 - The literal line `VOTE: <letter>` must appear EXACTLY ONCE, on the last
-  non-empty line of your output. If you mention voting in your reasoning,
-  write it as `vote` or describe the choice in prose — never write
-  `VOTE: A` (or any other label) on its own line in the reasoning.
-- Output format:
+  non-empty line of your output, with NO leading or trailing whitespace —
+  the parser is line-anchored and will discard `  VOTE: A`, `VOTE: A `,
+  or any other whitespace variant.
+- If you mention voting in your reasoning, write it as `vote` or describe
+  the choice in prose — never write `VOTE: A` (or any other label) on its
+  own line in the reasoning.
 
-  <1–3 sentences of reasoning>
+Output format — write everything flush-left (column 1), no leading spaces
+or tabs. Example shown between the dashed lines (do not include the dashes
+in your output):
 
-  VOTE: <label>
+----
+Brief 1–3 sentence reasoning here, in your own words.
 
-where <label> is one of the letters shown for the candidates above (e.g.
-`VOTE: A`). A ballot with zero or more than one `VOTE: <letter>` line is
-discarded.
+VOTE: A
+----
+
+where the label is one of the letters shown for the candidates above (e.g.
+`VOTE: A`). A ballot with zero or more than one `VOTE: <letter>` line, or
+with leading/trailing whitespace on the VOTE line, is discarded.

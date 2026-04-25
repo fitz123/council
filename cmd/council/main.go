@@ -497,6 +497,9 @@ func logEnd(w io.Writer, sess *session.Session, v *session.Verdict) {
 // individual unreadable per-expert output.md files are skipped, and the
 // ballot section emits whenever v.Voting.Ballots is populated even if no
 // rounds completed (e.g. resumed session that only re-ran the voting stage).
+// All artifact bodies are scrubbed of C0/DEL control bytes via
+// stripControlBytes before being written, so a malicious or malformed LLM
+// output cannot rewrite the operator's terminal state via ANSI/OSC escapes.
 func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 	if v == nil || sess == nil {
 		return
@@ -509,7 +512,7 @@ func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 				continue
 			}
 			fmt.Fprintf(w, "\n=== round %d expert %s (%s) ===\n", idx+1, e.Label, e.RealName)
-			fmt.Fprintln(w, strings.TrimRight(string(body), "\n"))
+			fmt.Fprintln(w, stripControlBytes(strings.TrimRight(string(body), "\n")))
 		}
 	}
 	if v.Voting != nil && len(v.Voting.Ballots) > 0 {
@@ -522,13 +525,33 @@ func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 			body, err := os.ReadFile(path)
 			fmt.Fprintf(w, "\n=== ballot %s (%s) ===\n", b.VoterLabel, realName[b.VoterLabel])
 			if err == nil {
-				fmt.Fprintln(w, strings.TrimRight(string(body), "\n"))
+				fmt.Fprintln(w, stripControlBytes(strings.TrimRight(string(body), "\n")))
 			}
 			if b.VotedFor == "" {
 				fmt.Fprintln(w, "(no vote — discarded)")
 			}
 		}
 	}
+}
+
+// stripControlBytes scrubs LLM-controlled artifact bodies of C0 control
+// characters (U+0000..U+001F) and DEL (U+007F) before they are written to
+// the operator's verbose stderr stream. Tab, newline, and carriage return
+// are preserved so multi-line and tabbed content renders normally; every
+// other control byte (ESC for ANSI/OSC, BEL, etc.) becomes U+FFFD so a
+// malformed or malicious peer output cannot clear the screen, rewrite
+// terminal state, or spoof subsequent council log lines.
+func stripControlBytes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\t' || r == '\n' || r == '\r' || (r >= 0x20 && r != 0x7f) {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteRune('�')
+	}
+	return b.String()
 }
 
 // displaySource renders the config source for the verbose preamble. The
