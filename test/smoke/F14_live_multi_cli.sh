@@ -3,12 +3,19 @@
 # (ADR-0012 / ADR-0013, plan task 9).
 #
 # Asserts the multi-CLI debate path actually wires up at the binary
-# level: `council init` materialises a three-expert profile under an
-# ephemeral $HOME, a real debate produces a 2-round verdict.json with
-# three expert sections in round 2, and the winner's output.md cites
-# at least one URL — proving every vendor's web-tool translation
-# (codex `-c tools.web_search=true`, gemini `--policy <toml>`, claude
-# `--allowedTools WebSearch,WebFetch`) makes it through end-to-end.
+# level: `council init --force` materialises a three-expert profile
+# under the user's real ~/.config/council/, a real debate produces a
+# 2-round verdict.json with three expert sections in round 2, and the
+# winner's output.md cites at least one URL — proving every vendor's
+# web-tool translation (codex `-c tools.web_search=true`, gemini
+# `--policy <toml>`, claude `--allowedTools WebSearch,WebFetch`) makes
+# it through end-to-end.
+#
+# F14 cannot use a fully-ephemeral $HOME because claude-code reads its
+# OAuth credentials from the macOS Keychain, whose ACL is bound to the
+# real $HOME path; symlinking ~/.claude/ into a tmp dir still surfaces
+# as "Not logged in". So the script keeps the real $HOME and instead
+# backs up + restores the user's ~/.config/council/ around the run.
 #
 # The unit-level codex/gemini live tests already prove single-CLI
 # vendor wiring; F14 is the cross-vendor integration probe.
@@ -56,19 +63,40 @@ if ! go build -o "$BIN" ./cmd/council; then
   exit 1
 fi
 
-tmp_home="$(mktemp -d -t council-f14-home.XXXXXX)"
+# F14 cannot use a fully-ephemeral $HOME because claude-code reads its
+# OAuth credentials from the macOS Keychain (ACL bound to the real
+# $HOME path), so symlinking ~/.claude/ into a tmp dir still surfaces
+# as "Not logged in". Instead we keep the real $HOME for auth and
+# back up + restore the user's ~/.config/council/ around the run so
+# `init --force` does not clobber an existing profile.
+council_dir="$HOME/.config/council"
+backup_dir=""
+if [ -e "$council_dir" ]; then
+  backup_dir="$(mktemp -d -t council-f14-backup.XXXXXX)"
+  cp -R "$council_dir" "$backup_dir/council"
+fi
 workdir="$(mktemp -d -t council-f14-cwd.XXXXXX)"
-trap 'rm -rf "$tmp_home" "$workdir"' EXIT
 
-# Step 1: council init under ephemeral $HOME. All three CLIs must
-# probe-verify so the generated profile carries three experts.
-echo "==> running \`council init\` (HOME=$tmp_home)"
-if ! HOME="$tmp_home" "$BIN" init; then
+restore_council() {
+  rm -rf "$council_dir"
+  if [ -n "$backup_dir" ]; then
+    mv "$backup_dir/council" "$council_dir"
+    rmdir "$backup_dir"
+  fi
+}
+trap 'restore_council; rm -rf "$workdir"' EXIT
+
+# Step 1: council init writes a fresh profile to the user's
+# ~/.config/council/. All three CLIs must probe-verify so the generated
+# profile carries three experts. The trap above restores the original
+# profile on exit.
+echo "==> running \`council init --force\`"
+if ! "$BIN" init --force; then
   echo "FAIL: council init exited non-zero"
   exit 1
 fi
 
-profile="$tmp_home/.config/council/default.yaml"
+profile="$council_dir/default.yaml"
 if [ ! -f "$profile" ]; then
   echo "FAIL: $profile not written by init"
   exit 1
@@ -89,7 +117,7 @@ echo "==> init wrote 3-expert profile at $profile"
 cd "$workdir" || { echo "FAIL: cd to workdir $workdir"; exit 1; }
 echo "==> running council debate (workdir: $workdir)"
 stdout_log="$workdir/council.stdout"
-if ! HOME="$tmp_home" "$BIN" "What is the current stable Go version? Cite a URL." > "$stdout_log"; then
+if ! "$BIN" "What is the current stable Go version? Cite a URL." > "$stdout_log"; then
   echo "FAIL: council exited non-zero"
   echo "----- stdout -----"
   cat "$stdout_log"
