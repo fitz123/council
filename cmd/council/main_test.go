@@ -257,8 +257,10 @@ func TestRun_HappyPath(t *testing.T) {
 	}
 }
 
-// TestRun_Verbose verifies the v2 preamble + per-round timing lines plus
-// the logArtifacts dump (per-expert round outputs + per-voter ballot blocks).
+// TestRun_Verbose verifies the v2 preamble, the live-streamed per-stage
+// blocks (rendered by stderrReporter as each subprocess finishes), and the
+// closing logEnd footer including the header-only verdict block + vote
+// ratio.
 func TestRun_Verbose(t *testing.T) {
 	t.Chdir(withCouncilDir(t, t.TempDir()))
 	freezeTimestamp(t, "17:02:14")
@@ -276,18 +278,24 @@ func TestRun_Verbose(t *testing.T) {
 		"spawning expert: expert_1",
 		"spawning expert: expert_2",
 		"spawning expert: expert_3",
-		"voting: winner A",
 		"session folder:",
-		// logArtifacts: per-expert round-output blocks render with their
-		// header AND body content (happyStub writes "body-<label>" to
-		// each output.md).
+		// stderrReporter live stream: per-expert round-output blocks
+		// (happyStub writes "body-<label>" to each output.md) and per-voter
+		// ballot blocks (happyStub emits "VOTE: A\n").
 		"=== round 1 expert ",
 		"=== round 2 expert ",
 		"body-",
-		// logArtifacts: per-voter ballot blocks render with their header
-		// AND ballot content (happyStub emits "VOTE: A\n" for every voter).
 		"=== ballot ",
 		"VOTE: A",
+		// stderrReporter timing line for at least one stage: format is
+		// "round N expert X (name) ok in Ns" (carries name + duration).
+		"round 1 expert ",
+		"ok in 0.0s",
+		// logEnd closing footer: vote ratio + winner real-name resolved
+		// in the verdict block.
+		"voting: winner A (3/3 votes)",
+		"=== verdict (winner: A —",
+		"3/3 votes) ===",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr missing %q; got %s", want, stderr.String())
@@ -296,6 +304,15 @@ func TestRun_Verbose(t *testing.T) {
 	// The judge line must be absent — v2 has no judge stage.
 	if strings.Contains(stderr.String(), "spawning judge") {
 		t.Errorf("stderr has judge line (v2 has no judge): %s", stderr.String())
+	}
+	// The verdict body must NOT be in stderr — it goes to stdout only, to
+	// avoid duplication when both streams render to the same terminal.
+	// happyStub's R2 winner body is "body-A"; it appears EXACTLY twice
+	// (R1 round block + R2 round block, both produced by the live stream).
+	// More than 2 means the verdict block leaked the body; fewer than 2
+	// means a round block went missing.
+	if got := strings.Count(stderr.String(), "body-A"); got != 2 {
+		t.Errorf("body-A appears %d times in stderr; want exactly 2 (R1 + R2 blocks).", got)
 	}
 }
 
@@ -544,7 +561,7 @@ func TestResolveVersion(t *testing.T) {
 }
 
 func TestStripControlBytes(t *testing.T) {
-	// Pin the contract so a future logArtifacts edit can't silently
+	// Pin the contract so a future stderrReporter edit can't silently
 	// reintroduce raw ANSI/OSC passthrough on stderr.
 	cases := []struct {
 		name, in, want string

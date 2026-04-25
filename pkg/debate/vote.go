@@ -45,6 +45,10 @@ func parseBallotVote(body string) (string, bool) {
 // is the ACTIVE cohort — only experts who reached R2 with ok or carried
 // participation. Timeout overrides each expert's per-round timeout so the
 // ballot budget is configured centrally via profile.Voting.Timeout.
+//
+// Reporter receives one OnStageDone call per voter as that ballot completes
+// (success, discarded, rate-limited, or resumed-from-cache). Nil is treated
+// as NopReporter so existing callers don't have to change.
 type BallotConfig struct {
 	Session    *session.Session
 	Experts    []LabeledExpert
@@ -52,6 +56,7 @@ type BallotConfig struct {
 	BallotBody string
 	Timeout    time.Duration
 	MaxRetries int
+	Reporter   Reporter
 }
 
 // Ballot is one voter's outcome. VotedFor is "" when the ballot was discarded
@@ -101,6 +106,9 @@ func RunBallot(ctx context.Context, cfg BallotConfig, question, aggregateMD stri
 	if cfg.Session == nil {
 		return nil, fmt.Errorf("RunBallot: BallotConfig.Session required")
 	}
+	if cfg.Reporter == nil {
+		cfg.Reporter = NopReporter{}
+	}
 	votesDir := filepath.Join(cfg.Session.Path, "voting", "votes")
 	if err := os.MkdirAll(votesDir, 0o755); err != nil {
 		return nil, fmt.Errorf("RunBallot: mkdir %s: %w", votesDir, err)
@@ -132,6 +140,9 @@ func RunBallot(ctx context.Context, cfg BallotConfig, question, aggregateMD stri
 // silent — malformed ballots are a known D8 failure mode, not a run abort.
 func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, question, aggregateMD string, active map[string]bool) Ballot {
 	result := Ballot{VoterLabel: ex.Label}
+	resumed := false
+	var reportBody []byte
+	defer func() { reportBallot(cfg.Reporter, ex, &result, reportBody, resumed) }()
 
 	votesDir := filepath.Join(cfg.Session.Path, "voting", "votes")
 	stdoutPath := filepath.Join(votesDir, ex.Label+".txt")
@@ -153,6 +164,8 @@ func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, quest
 				// a successful resume.
 				_ = os.Remove(stderrPath)
 				result.VotedFor = label
+				reportBody = body
+				resumed = true
 				return result
 			}
 		}
@@ -194,6 +207,7 @@ func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, quest
 	if rerr != nil {
 		return result
 	}
+	reportBody = body
 	if ferr := prompt.CheckForgery(string(body), cfg.Nonce); ferr != nil {
 		return result
 	}

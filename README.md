@@ -91,6 +91,7 @@ Resume an interrupted run:
 ```
 council resume                  # pick up the newest incomplete session
 council resume --session <id>   # resume an explicit session ID
+council resume -v               # resume with the same live verbose stream as a fresh run
 ```
 
 Resume is idempotent on per-stage `.done` markers — already-finished experts and ballots are reused rather than respawned.
@@ -133,27 +134,51 @@ council injects `CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000` into each `claude` subproc
 
 ## Verbose mode
 
-`-v` streams structured progress to stderr while the answer still goes to stdout:
+`-v` streams the live debate to stderr — preamble, then per-stage timing line + artifact block as each subprocess finishes, then a closing summary with the verdict block. The winner's answer still goes to stdout, so `council -v "q" > answer.txt` works as expected. The flag is also accepted by `council resume`.
 
 ```
-$ council -v "what is 2+2?"
+$ council -v "what is the latest stable Go version?"
 [17:02:14] council v0.2.0 — session 2026-04-19T17-02-14Z-fizzy-jingling-quokka
-[17:02:14] profile: default (3 experts, quorum 1, rounds 2) from embedded
-[17:02:14] spawning expert: expert_1 (claude-code, sonnet)
-[17:02:14] spawning expert: expert_2 (claude-code, sonnet)
-[17:02:14] spawning expert: expert_3 (claude-code, sonnet)
-[17:02:47] round 1 expert A (expert_2): ok in 17.3s (retries=0)
-[17:02:47] round 1 expert B (expert_1): ok in 19.1s (retries=0)
-[17:02:47] round 1 expert C (expert_3): ok in 14.1s (retries=0)
-[17:03:08] round 2 expert A (expert_2): ok in 21.4s (retries=0)
-[17:03:08] round 2 expert B (expert_1): ok in 20.7s (retries=0)
-[17:03:08] round 2 expert C (expert_3): ok in 19.8s (retries=0)
-[17:03:12] voting: winner B
-[17:03:12] session ok: 58.4s total
-[17:03:12] session folder: ./.council/sessions/2026-04-19T17-02-14Z-fizzy-jingling-quokka
+[17:02:14] profile: default (3 experts, quorum 2, rounds 2) from .council/default.yaml
+[17:02:14] spawning expert: claude_expert (claude-code, haiku)
+[17:02:14] spawning expert: codex_expert (codex, gpt-5.4-mini)
+[17:02:14] spawning expert: gemini_expert (gemini-cli, gemini-3.1-flash-lite-preview)
+[17:02:32] round 1 expert C (claude_expert) ok in 18.2s (retries=0)
+
+=== round 1 expert C (claude_expert) ===
+The latest stable Go version is **go1.26.2**, released on April 7, 2026…
+
+[17:02:35] round 1 expert B (codex_expert) ok in 20.8s (retries=0)
+
+=== round 1 expert B (codex_expert) ===
+The latest stable Go version is Go 1.26.2…
+
+…
+[17:05:11] ballot B (codex_expert) voted for B in 35.6s
+
+=== ballot B (codex_expert) ===
+B is the most direct and least error-prone…
+
+VOTE: B
+
+[17:05:11] voting: winner B (2/3 votes)
+[17:05:11] session ok: 241.6s total
+[17:05:11] session folder: ./.council/sessions/2026-04-19T17-02-14Z-fizzy-jingling-quokka
+
+=== verdict (winner: B — codex_expert, 2/3 votes) ===
 ```
 
-The `profile: … from <source>` line names which config file the profile loaded from (cwd-local path, user-global path, or `embedded`). Per-round lines carry the anonymized label + real name + participation status (`ok` / `carried` / `failed`) and retry count, so the stderr stream and `verdict.json` agree on what happened.
+Per-stage events arrive in completion order (whoever finishes first appears first), not pre-sorted by label — that's the live-observer experience. The stage variants you may see:
+
+- `round N expert X (name) ok in Ts` — fresh successful subprocess.
+- `round N expert X (name) reused from cache` — short-circuited via the `.done` resume marker.
+- `round 2 expert X (name) carried R1 body forward (R2 failed)` — R2 subprocess failed; R1 body was carried forward (variants: `R2 rate-limited: <pattern>` for vendor rate limits, `reused carried R1 body from cache` on resume).
+- `round N expert X (name) FAILED in Ts` — subprocess error after retries (variant: `FAILED in Ts: rate-limited (<pattern>)`).
+- `ballot X (name) voted for Y in Ts` / `discarded (rate-limited)` / `discarded (malformed)`.
+
+The closing `=== verdict (winner: X — name, A/N votes) ===` block carries only the header — the answer body lives on stdout to avoid duplication when both streams render to the same terminal. On a tie, the block reads `=== verdict (no consensus — tied: A, C) ===` (no body).
+
+Untrusted LLM bytes in artifact bodies are scrubbed of C0/DEL/C1 control characters before stderr — a malformed expert output cannot rewrite your terminal state via ANSI escapes.
 
 Transcripts always land in the session folder, regardless of `-v`.
 
