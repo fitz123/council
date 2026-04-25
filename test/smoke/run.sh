@@ -71,5 +71,17 @@ if [ "$TEST_EXIT" -ne 0 ]; then
   echo "==> SMOKE FAILED (go test exit $TEST_EXIT)"
   exit "$TEST_EXIT"
 fi
+
+# F14 — gated end-to-end three-CLI debate. Skipped silently unless
+# COUNCIL_LIVE_ALL=1 (plus the three per-CLI gates). Lives in its own
+# script because it needs ephemeral $HOME + a real council subprocess
+# rather than the in-process go-test harness above.
+echo
+echo "==> running F14 (gated by COUNCIL_LIVE_ALL=1)"
+if ! bash "$SCRIPT_DIR/F14_live_multi_cli.sh"; then
+  echo "==> SMOKE FAILED (F14)"
+  exit 1
+fi
+
 echo
 echo "==> SMOKE PASSED"
