@@ -84,6 +84,10 @@ type LabeledExpert struct {
 // round-level quorum gate respectively. R2PromptBody is the profile-level
 // peer-aware role prompt that replaces each expert's R1 PromptBody in round
 // 2 (design §3.4). RunRound1 ignores it.
+//
+// Reporter receives one OnStageDone call per expert as that expert's stage
+// completes (success, failure, carried, or resumed-from-cache). Nil is
+// treated as NopReporter so existing callers don't have to change.
 type RoundConfig struct {
 	Session      *session.Session
 	Experts      []LabeledExpert
@@ -91,6 +95,7 @@ type RoundConfig struct {
 	MaxRetries   int
 	Nonce        string
 	R2PromptBody string
+	Reporter     Reporter
 }
 
 // RoundOutput captures one expert's outcome for a single round. Body holds
@@ -129,6 +134,9 @@ type RoundOutput struct {
 func RunRound1(ctx context.Context, cfg RoundConfig, question string) ([]RoundOutput, error) {
 	if cfg.Session == nil {
 		return nil, fmt.Errorf("RunRound1: RoundConfig.Session required")
+	}
+	if cfg.Reporter == nil {
+		cfg.Reporter = NopReporter{}
 	}
 
 	experts := append([]LabeledExpert(nil), cfg.Experts...)
@@ -191,6 +199,8 @@ func runExpertR1(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 		Name:          ex.Role.Name,
 		Participation: "failed",
 	}
+	resumed := false
+	defer func() { reportRoundExpert(cfg.Reporter, 1, ex, &result, resumed) }()
 
 	dir := cfg.Session.RoundExpertDir(1, ex.Label)
 	// Resume path (D14): if the stage .done marker already exists, trust the
@@ -201,14 +211,18 @@ func runExpertR1(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 	if body, ok := readCompletedStage(dir); ok {
 		result.Participation = "ok"
 		result.Body = body
+		resumed = true
 		return result
 	}
 	// R1 failures are permanent per D3 ("expert is DROPPED from session").
 	// A .failed marker left by a prior attempt freezes the drop across
 	// resume — otherwise a previously-failed expert could be re-spawned,
 	// succeed, and land in a cohort whose other R2 .done outputs were built
-	// without it.
+	// without it. Mark resumed=true so the live verbose stream renders this
+	// as "reused failed marker from cache" rather than a fresh "FAILED in
+	// 0.0s" event — the failure already streamed in the prior session.
 	if _, err := os.Stat(filepath.Join(dir, ".failed")); err == nil {
+		resumed = true
 		return result
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -321,6 +335,9 @@ func RunRound2(ctx context.Context, cfg RoundConfig, question string, r1 []Round
 	if cfg.Session == nil {
 		return nil, fmt.Errorf("RunRound2: RoundConfig.Session required")
 	}
+	if cfg.Reporter == nil {
+		cfg.Reporter = NopReporter{}
+	}
 
 	experts := append([]LabeledExpert(nil), cfg.Experts...)
 	sort.Slice(experts, func(i, j int) bool { return experts[i].Label < experts[j].Label })
@@ -376,12 +393,19 @@ func runExpertR2(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 		Name:          ex.Role.Name,
 		Participation: "failed",
 	}
+
 	// R1-dropped experts have no last-known-good to carry and are not
 	// invoked in R2. Caller uses the participation field to key the
-	// verdict entry; the remaining zero fields are harmless.
+	// verdict entry; the remaining zero fields are harmless. Return
+	// BEFORE the reporter defer is installed so the live verbose stream
+	// doesn't emit a duplicate "round 2 ... FAILED in 0.0s" line for an
+	// expert that already reported its R1 failure.
 	if r1Self == nil || r1Self.Participation != "ok" {
 		return result
 	}
+
+	resumed := false
+	defer func() { reportRoundExpert(cfg.Reporter, 2, ex, &result, resumed) }()
 
 	dir := cfg.Session.RoundExpertDir(2, ex.Label)
 	// Resume path (D14): reuse the prior run's finalized stage. A sibling
@@ -396,6 +420,7 @@ func runExpertR2(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 			result.Participation = "ok"
 		}
 		result.Body = body
+		resumed = true
 		return result
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {

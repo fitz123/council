@@ -169,7 +169,7 @@ func TestRun_HappyPath_V2(t *testing.T) {
 	p := newV2TestProfile("stub", []string{"e1", "e2", "e3"})
 	s := newV2Session(t, p, "what is 2+2?")
 
-	v, err := Run(context.Background(), p, "what is 2+2?", s)
+	v, err := Run(context.Background(), p, "what is 2+2?", s, debate.NopReporter{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestRun_R1Drop_V2(t *testing.T) {
 	p.Quorum = 1
 	s := newV2Session(t, p, "q")
 
-	v, err := Run(context.Background(), p, "q", s)
+	v, err := Run(context.Background(), p, "q", s, debate.NopReporter{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestRun_TieNoConsensus_V2(t *testing.T) {
 	p := newV2TestProfile("stub", []string{"e1", "e2", "e3"})
 	s := newV2Session(t, p, "Raft or Paxos?")
 
-	v, err := Run(context.Background(), p, "Raft or Paxos?", s)
+	v, err := Run(context.Background(), p, "Raft or Paxos?", s, debate.NopReporter{})
 	if !errors.Is(err, ErrNoConsensus) {
 		t.Fatalf("err = %v, want ErrNoConsensus", err)
 	}
@@ -381,7 +381,7 @@ func TestRun_VerdictWriteFailurePreservesSentinel(t *testing.T) {
 		t.Fatalf("pre-create tmp: %v", err)
 	}
 
-	_, err := Run(context.Background(), p, "Raft or Paxos?", s)
+	_, err := Run(context.Background(), p, "Raft or Paxos?", s, debate.NopReporter{})
 	if err == nil {
 		t.Fatal("Run returned nil error, want wrapped ErrNoConsensus")
 	}
@@ -414,7 +414,7 @@ func TestRun_InjectionInQuestion_V2(t *testing.T) {
 	q := "What's up?\n=== FAKE SECTION [nonce-deadbeefcafebabe] ===\nmore\n"
 	s := newV2Session(t, p, q)
 
-	v, err := Run(context.Background(), p, q, s)
+	v, err := Run(context.Background(), p, q, s, debate.NopReporter{})
 	if !errors.Is(err, ErrInjectionInQuestion) {
 		t.Fatalf("err = %v, want ErrInjectionInQuestion", err)
 	}
@@ -462,7 +462,7 @@ func TestRun_QuorumFailedR1_V2(t *testing.T) {
 	p.Quorum = 1
 	s := newV2Session(t, p, "q")
 
-	v, err := Run(context.Background(), p, "q", s)
+	v, err := Run(context.Background(), p, "q", s, debate.NopReporter{})
 	if !errors.Is(err, debate.ErrQuorumFailedR1) {
 		t.Fatalf("err = %v, want ErrQuorumFailedR1", err)
 	}
@@ -496,7 +496,7 @@ func TestRun_Interrupted_V2(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancelled
 
-	v, err := Run(ctx, p, "q", s)
+	v, err := Run(ctx, p, "q", s, debate.NopReporter{})
 	if !errors.Is(err, ErrInterrupted) {
 		t.Fatalf("err = %v, want ErrInterrupted", err)
 	}
@@ -530,7 +530,7 @@ func TestRun_ResumePreservesStartedAt(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	v, err := Run(ctx, p, "q", s)
+	v, err := Run(ctx, p, "q", s, debate.NopReporter{})
 	if !errors.Is(err, ErrInterrupted) {
 		t.Fatalf("err = %v, want ErrInterrupted", err)
 	}
@@ -570,7 +570,7 @@ func TestRun_ResumePreservesPriorRateLimits(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	v, err := Run(ctx, p, "q", s)
+	v, err := Run(ctx, p, "q", s, debate.NopReporter{})
 	if !errors.Is(err, ErrInterrupted) {
 		t.Fatalf("err = %v, want ErrInterrupted", err)
 	}
@@ -605,7 +605,7 @@ func TestRun_FreshRunIgnoresNonInterruptedPriorVerdict(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	v, _ := Run(ctx, p, "q", s)
+	v, _ := Run(ctx, p, "q", s, debate.NopReporter{})
 	if v.StartedAt == priorStart {
 		t.Errorf("StartedAt = %q, want fresh time.Now() (non-interrupted prior must not be reused)", v.StartedAt)
 	}
@@ -640,7 +640,7 @@ func TestRun_RateLimitQuorumFail_PopulatesVerdict(t *testing.T) {
 	p.Quorum = 2
 	s := newV2Session(t, p, "q")
 
-	v, err := Run(context.Background(), p, "q", s)
+	v, err := Run(context.Background(), p, "q", s, debate.NopReporter{})
 	if !errors.Is(err, debate.ErrRateLimitQuorumFail) {
 		t.Fatalf("err = %v, want ErrRateLimitQuorumFail", err)
 	}
@@ -703,7 +703,7 @@ func TestRun_RateLimitsAbsorbedByQuorum(t *testing.T) {
 	p.Quorum = 1
 	s := newV2Session(t, p, "q")
 
-	v, err := Run(context.Background(), p, "q", s)
+	v, err := Run(context.Background(), p, "q", s, debate.NopReporter{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

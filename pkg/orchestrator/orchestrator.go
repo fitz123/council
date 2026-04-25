@@ -78,7 +78,11 @@ const timestampLayout = time.RFC3339
 // The caller is expected to have already invoked session.Create (via
 // cmd/council.createSession) to materialise the session folder with the
 // nonce baked into profile.snapshot.yaml.
-func Run(ctx context.Context, profile *config.Profile, question string, sess *session.Session) (*session.Verdict, error) {
+//
+// reporter receives one OnStageDone call as each round-expert and ballot
+// stage completes. Pass debate.NopReporter{} when no live streaming is
+// wanted (i.e. when --verbose is off); the no-op call is inlinable.
+func Run(ctx context.Context, profile *config.Profile, question string, sess *session.Session, reporter debate.Reporter) (*session.Verdict, error) {
 	// On resume, an "interrupted" verdict.json from the previous attempt
 	// carries the original run's started_at AND its rate_limits[]. Preserve
 	// both: started_at so duration_seconds reflects total wall-clock from
@@ -136,6 +140,7 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 		MaxRetries:   profile.MaxRetries,
 		Nonce:        sess.Nonce,
 		R2PromptBody: profile.Round2Prompt.Body,
+		Reporter:     reporter,
 	}
 
 	// Stage 3: round 1 (blind fan-out).
@@ -199,6 +204,7 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 		BallotBody: profile.Voting.BallotPromptBody,
 		Timeout:    profile.Voting.Timeout,
 		MaxRetries: profile.MaxRetries,
+		Reporter:   reporter,
 	}
 	ballots, err := debate.RunBallot(ctx, bcfg, question, string(aggregateMD))
 	v.RateLimits = append(v.RateLimits, collectBallotLimits(ballots)...)

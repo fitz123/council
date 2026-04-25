@@ -115,6 +115,73 @@ func TestResume_ExplicitSessionRejectsFinal(t *testing.T) {
 	}
 }
 
+// TestResume_Verbose — `council resume -v` must fire the same preamble +
+// live stage stream + closing footer as a fresh `-v` run, so the operator
+// gets a consistent observer experience whether they're watching a fresh
+// or a resumed session. Pins the logStart-on-resume wiring + the reporter
+// passing through orchestrator.Run from the resume path.
+func TestResume_Verbose(t *testing.T) {
+	cwd := withCouncilDir(t, t.TempDir())
+	t.Chdir(cwd)
+	freezeTimestamp(t, "17:02:14")
+
+	// First run: complete the debate so all stage .done markers exist.
+	registerStub(t, happyStub())
+	if code, _, stderr := runMainCmd(t, context.Background(), "q"); code != exitOK {
+		t.Fatalf("first run exit = %d, want %d (stderr=%s)", code, exitOK, stderr)
+	}
+	sessions, _ := filepath.Glob(".council/sessions/*")
+	if len(sessions) != 1 {
+		t.Fatalf("session count = %d, want 1", len(sessions))
+	}
+	sess := sessions[0]
+
+	// Make the session resumable by removing the root .done and rewriting
+	// verdict.json to a non-final status. The per-stage .done markers stay,
+	// so resume's per-stage runners will short-circuit via "reused from
+	// cache" — exactly the path that the live verbose stream needs to
+	// render correctly. Also wipe the voting artifacts so ballots re-run
+	// (those have no per-voter .done; the .txt files are the cache).
+	_ = os.Remove(filepath.Join(sess, ".done"))
+	if err := os.WriteFile(filepath.Join(sess, "verdict.json"),
+		[]byte(`{"status": "interrupted"}`), 0o644); err != nil {
+		t.Fatalf("rewrite verdict: %v", err)
+	}
+	_ = os.RemoveAll(filepath.Join(sess, "voting"))
+
+	// Re-register a fresh stub for the resume's ballot stage (round paths
+	// short-circuit via .done, ballots re-run).
+	registerStub(t, happyStub())
+
+	code, stdout, stderr := runMainCmd(t, context.Background(), "resume", "-v")
+	if code != exitOK {
+		t.Fatalf("resume exit = %d, want %d (stderr=%s)", code, exitOK, stderr)
+	}
+	if !strings.Contains(stdout, "body-A") {
+		t.Errorf("stdout missing winner body: %q", stdout)
+	}
+	for _, want := range []string{
+		// Preamble (logStart) must fire on resume too — symmetry with fresh-run -v.
+		"[17:02:14] council",
+		"profile: default",
+		"spawning expert: expert_1",
+		// Live stream: the per-stage events fire even for cached
+		// stages (Resumed=true round-expert events show as "reused
+		// from cache"). At least one such line must appear.
+		"reused from cache",
+		// Live ballot stream (ballots re-ran; we wiped the cache).
+		"=== ballot ",
+		"VOTE: A",
+		// Closing footer: voting summary + verdict block.
+		"voting: winner A (3/3 votes)",
+		"=== verdict (winner: A —",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q on resume -v; got %s", want, stderr)
+		}
+	}
+}
+
 // TestResume_AfterFullR2_RunsOnlyVote — happy v2 flow killed AFTER R2 but
 // BEFORE the vote stage. On resume:
 //   - all R1 + R2 stage .done markers present, R2 outputs cached

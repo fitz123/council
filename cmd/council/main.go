@@ -179,15 +179,16 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		return exitConfigError
 	}
 
+	var reporter debate.Reporter = debate.NopReporter{}
 	if verbose {
 		logStart(stderr, sess, profile, source)
+		reporter = newStderrReporter(stderr)
 	}
 
-	v, err := orchestrator.Run(ctx, profile, question, sess)
+	v, err := orchestrator.Run(ctx, profile, question, sess, reporter)
 
 	if verbose {
 		logEnd(stderr, sess, v)
-		logArtifacts(stderr, sess, v)
 	}
 
 	switch {
@@ -241,8 +242,13 @@ func runResume(ctx context.Context, argv []string, stdout, stderr io.Writer) int
 	fs := flag.NewFlagSet("council resume", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	var sessionID string
+	var (
+		sessionID string
+		verbose   bool
+	)
 	fs.StringVar(&sessionID, "session", "", "Resume the named session ID (default: newest incomplete).")
+	fs.BoolVar(&verbose, "verbose", false, "Stream structured progress to stderr.")
+	fs.BoolVar(&verbose, "v", false, "Stream structured progress to stderr (shorthand).")
 
 	if err := fs.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -332,7 +338,19 @@ func runResume(ctx context.Context, argv []string, stdout, stderr io.Writer) int
 		return exitConfigError
 	}
 
-	v, err := orchestrator.Run(ctx, profile, question, sess)
+	var reporter debate.Reporter = debate.NopReporter{}
+	if verbose {
+		// resume's profile source isn't a fresh-load path: the snapshot
+		// lives inside the session folder. Pass that path so logStart's
+		// "from <path>" line points at the actual config bytes used.
+		snapshotPath := filepath.Join(sess.Path, "profile.snapshot.yaml")
+		logStart(stderr, sess, profile, snapshotPath)
+		reporter = newStderrReporter(stderr)
+	}
+	v, err := orchestrator.Run(ctx, profile, question, sess, reporter)
+	if verbose {
+		logEnd(stderr, sess, v)
+	}
 	switch {
 	case err == nil:
 		fmt.Fprint(stdout, v.Answer)
@@ -423,13 +441,13 @@ func printHelp(w io.Writer) {
   council [flags] "question"
   council [flags] -          # read question from stdin (until EOF)
   council init [--force]
-  council resume [--session ID]
+  council resume [--session ID] [-v]
   council --version
   council --help
 
 Flags:
   -p, --profile NAME   Profile to use (default: "default"; only "default" is currently supported).
-  -v, --verbose        Stream structured progress to stderr.
+  -v, --verbose        Stream structured progress to stderr (also accepted by 'resume').
       --version        Print version and exit.
 
 Subcommands:
@@ -437,6 +455,7 @@ Subcommands:
                        with one expert per verified CLI. Idempotent without --force.
   resume               Continue the newest incomplete session, or the one named
                        by --session. Re-runs any stage missing its .done marker.
+                       Accepts -v / --verbose to stream the resumed stages live.
 
 Exit codes:
   0    success
@@ -464,82 +483,85 @@ func logStart(w io.Writer, sess *session.Session, p *config.Profile, source stri
 	}
 }
 
-// logEnd emits the post-run timing summary in verbose mode. It reads
-// timings from the verdict that orchestrator.Run already populated, so
-// the on-disk verdict.json and the stderr stream agree byte-for-byte on
-// per-role durations.
+// logEnd emits the post-run summary in verbose mode. The per-stage timing
+// lines and artifact bodies stream live via stderrReporter as each stage
+// completes, so logEnd is just the closing footer: voting outcome (with
+// vote ratio), session status + duration, session folder path, and a
+// header-only verdict block whose body lives on stdout (avoiding a duplicate).
 func logEnd(w io.Writer, sess *session.Session, v *session.Verdict) {
 	if v == nil {
 		return
 	}
 	ts := nowStamp()
-	for idx, r := range v.Rounds {
-		for _, e := range r.Experts {
-			fmt.Fprintf(w, "[%s] round %d expert %s (%s): %s in %.1fs (retries=%d)\n",
-				ts, idx+1, e.Label, e.RealName, e.Participation, e.DurationSeconds, e.Retries)
-		}
-	}
 	if v.Voting != nil {
-		if v.Voting.Winner != "" {
-			fmt.Fprintf(w, "[%s] voting: winner %s\n", ts, v.Voting.Winner)
-		} else if len(v.Voting.TiedCandidates) > 0 {
+		switch {
+		case v.Voting.Winner != "":
+			total := totalVotes(v.Voting.Votes)
+			// Votes can be nil on a partially-built verdict (resume edge,
+			// e.g. ballot stage didn't complete cleanly). Fall back to the
+			// bare winner line rather than render a nonsense "0/0 votes".
+			if total == 0 {
+				fmt.Fprintf(w, "[%s] voting: winner %s\n", ts, v.Voting.Winner)
+			} else {
+				fmt.Fprintf(w, "[%s] voting: winner %s (%d/%d votes)\n",
+					ts, v.Voting.Winner, v.Voting.Votes[v.Voting.Winner], total)
+			}
+		case len(v.Voting.TiedCandidates) > 0:
 			fmt.Fprintf(w, "[%s] voting: tied candidates %v\n", ts, v.Voting.TiedCandidates)
 		}
 	}
 	fmt.Fprintf(w, "[%s] session %s: %.1fs total\n", ts, v.Status, v.DurationSeconds)
 	fmt.Fprintf(w, "[%s] session folder: %s\n", ts, sess.Path)
+	logVerdictBlock(w, v)
 }
 
-// logArtifacts dumps each expert's round output and per-voter ballot blocks
-// to w after the timing summary. Lets a verbose run answer "who said what
-// and who voted for whom" without having to open files in the session folder.
-// Each section is independent: rounds with no readable output.md are skipped,
-// individual unreadable per-expert output.md files are skipped, and the
-// ballot section emits whenever v.Voting.Ballots is populated even if no
-// rounds completed (e.g. resumed session that only re-ran the voting stage).
-// All artifact bodies are scrubbed of C0/DEL control bytes via
-// stripControlBytes before being written, so a malicious or malformed LLM
-// output cannot rewrite the operator's terminal state via ANSI/OSC escapes.
-func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
-	if v == nil || sess == nil {
+// logVerdictBlock writes the header-only closing block. The winner branch
+// includes the resolved real_name and vote ratio so the operator sees
+// who won, who that is, and how decisively. The body is intentionally
+// omitted: it lives on stdout (the program's product) and including it
+// here would print it twice when stderr+stdout share a terminal. The tied
+// branch carries no body anyway (F12 invariant: no single answer when no
+// winner).
+func logVerdictBlock(w io.Writer, v *session.Verdict) {
+	if v.Voting == nil {
 		return
 	}
-	for idx, r := range v.Rounds {
-		for _, e := range r.Experts {
-			path := filepath.Join(sess.RoundExpertDir(idx+1, e.Label), "output.md")
-			body, err := os.ReadFile(path)
-			if err != nil {
-				continue
-			}
-			fmt.Fprintf(w, "\n=== round %d expert %s (%s) ===\n", idx+1, e.Label, e.RealName)
-			fmt.Fprintln(w, stripControlBytes(strings.TrimRight(string(body), "\n")))
-		}
-	}
-	if v.Voting != nil && len(v.Voting.Ballots) > 0 {
-		realName := make(map[string]string, len(v.Experts))
+	switch {
+	case v.Voting.Winner != "":
+		realName := ""
 		for _, e := range v.Experts {
-			realName[e.Label] = e.RealName
-		}
-		for _, b := range v.Voting.Ballots {
-			fmt.Fprintf(w, "\n=== ballot %s (%s) ===\n", b.VoterLabel, realName[b.VoterLabel])
-			path := filepath.Join(sess.Path, "voting", "votes", b.VoterLabel+".txt")
-			body, err := os.ReadFile(path)
-			switch {
-			case err == nil:
-				fmt.Fprintln(w, stripControlBytes(strings.TrimRight(string(body), "\n")))
-			case b.VotedFor != "":
-				// File missing/unreadable but the verdict has a vote
-				// recorded — fall back to the structured outcome so the
-				// operator can always see "who voted for whom" even if
-				// the on-disk artifact was wiped between the run and
-				// this dump.
-				fmt.Fprintf(w, "VOTE: %s\n", b.VotedFor)
-			}
-			if b.VotedFor == "" {
-				fmt.Fprintln(w, "(no vote — discarded)")
+			if e.Label == v.Voting.Winner {
+				realName = e.RealName
+				break
 			}
 		}
+		total := totalVotes(v.Voting.Votes)
+		// Build the suffix conditionally so a missing real_name (winner
+		// label not in v.Experts — pathological but possible on a
+		// partially-built verdict) doesn't render a stray " — " separator,
+		// and a zero-vote-count case (Votes nil) doesn't render "0/0".
+		header := fmt.Sprintf("winner: %s", v.Voting.Winner)
+		if realName != "" {
+			header += " — " + realName
+		}
+		if total > 0 {
+			header += fmt.Sprintf(", %d/%d votes", v.Voting.Votes[v.Voting.Winner], total)
+		}
+		fmt.Fprintf(w, "\n=== verdict (%s) ===\n", header)
+	case len(v.Voting.TiedCandidates) > 0:
+		fmt.Fprintf(w, "\n=== verdict (no consensus — tied: %s) ===\n",
+			strings.Join(v.Voting.TiedCandidates, ", "))
 	}
+}
+
+// totalVotes sums all candidate vote counts (including zeros). Used by
+// the winner footer + verdict block to render the X/N ratio.
+func totalVotes(votes map[string]int) int {
+	n := 0
+	for _, c := range votes {
+		n += c
+	}
+	return n
 }
 
 // stripControlBytes scrubs LLM-controlled artifact bodies of terminal-
