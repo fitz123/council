@@ -122,6 +122,12 @@ func (c *ClaudeCode) Execute(ctx context.Context, req executor.Request) (executo
 		"-p", "-",
 		"--model", c.MapModel(req.Model),
 		"--output-format", "text",
+		// --no-session-persistence: emitted unconditionally on every call
+		// (tools-enabled and ballot path) so claude-code never writes a
+		// session file to ~/.claude. Council is a one-shot orchestrator;
+		// persisting state across invocations would leak prior-question
+		// context into subsequent runs.
+		"--no-session-persistence",
 	}
 
 	// ADR-0010 D17: emit --allowedTools / --permission-mode only when the

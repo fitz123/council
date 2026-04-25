@@ -76,10 +76,10 @@ func TestExecuteHappyPath(t *testing.T) {
 	got, _ := os.ReadFile(out)
 	gotStr := string(got)
 
-	// argv assertion: must contain the four flag tokens in the right
+	// argv assertion: must contain the flag tokens in the right
 	// order. We assert on a substring rather than the full line so
 	// future additions (a verbose flag, etc.) don't break the test.
-	wantArgv := "-p - --model sonnet --output-format text"
+	wantArgv := "-p - --model sonnet --output-format text --no-session-persistence"
 	if !strings.Contains(gotStr, "ARGV: "+wantArgv) {
 		t.Errorf("argv mismatch.\ngot:  %q\nwant substring: %q", gotStr, wantArgv)
 	}
@@ -245,10 +245,10 @@ func TestExecuteEmitsToolFlagsConditionally(t *testing.T) {
 		wantAbsent     []string
 	}{
 		{
-			name:           "empty preserves v1 argv",
+			name:           "empty preserves base argv",
 			allowedTools:   nil,
 			permissionMode: "",
-			wantContains:   []string{"-p - --model sonnet --output-format text"},
+			wantContains:   []string{"-p - --model sonnet --output-format text --no-session-persistence"},
 			wantAbsent:     []string{"--allowedTools", "--permission-mode"},
 		},
 		{
@@ -319,6 +319,54 @@ func TestExecuteEmitsToolFlagsConditionally(t *testing.T) {
 				if strings.Contains(gotStr, sub) {
 					t.Errorf("argv unexpectedly contains %q\ngot: %q", sub, gotStr)
 				}
+			}
+		})
+	}
+}
+
+// TestExecuteAlwaysEmitsNoSessionPersistence locks in the unconditional
+// emission of --no-session-persistence: the flag must appear in argv on
+// every call regardless of AllowedTools/PermissionMode shape, including
+// the ballot path which hard-codes both fields to zero. Council is a
+// one-shot orchestrator; persisting session state across invocations
+// would leak prior-question context.
+func TestExecuteAlwaysEmitsNoSessionPersistence(t *testing.T) {
+	cases := []struct {
+		name           string
+		allowedTools   []string
+		permissionMode string
+	}{
+		{name: "ballot path (both zero)", allowedTools: nil, permissionMode: ""},
+		{name: "tools-enabled path", allowedTools: []string{"WebSearch", "WebFetch"}, permissionMode: "bypassPermissions"},
+		{name: "tools only", allowedTools: []string{"WebSearch"}, permissionMode: ""},
+		{name: "permission only", allowedTools: nil, permissionMode: "bypassPermissions"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := writeStub(t)
+			c := &ClaudeCode{Binary: stub}
+
+			tmp := t.TempDir()
+			out := filepath.Join(tmp, "out")
+			errf := filepath.Join(tmp, "err")
+
+			_, err := c.Execute(context.Background(), executor.Request{
+				Prompt:         "x",
+				Model:          "sonnet",
+				Timeout:        5 * time.Second,
+				StdoutFile:     out,
+				StderrFile:     errf,
+				AllowedTools:   tc.allowedTools,
+				PermissionMode: tc.permissionMode,
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			got, _ := os.ReadFile(out)
+			gotStr := string(got)
+			if !strings.Contains(gotStr, "--no-session-persistence") {
+				t.Errorf("argv missing --no-session-persistence\ngot: %q", gotStr)
 			}
 		})
 	}
