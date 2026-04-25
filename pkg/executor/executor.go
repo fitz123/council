@@ -48,9 +48,14 @@ type Executor interface {
 // model release can add per-vendor translation without changing
 // callers.
 //
-// MaxRetries is the profile's max_retries value, passed through so the
-// executor can size its rate-limit retry budget per design/v1.md §10's
-// `max_retries + 1` rule. Fail-retry policy stays orchestrator-owned.
+// MaxRetries is the profile's max_retries value, carried for parity
+// with the request shape callers populate from profile.MaxRetries. The
+// fail-retry loop runs in pkg/debate (runWithFailRetry) using
+// profile.MaxRetries directly; executors pass MaxRetries: 0 to
+// runner.Run so runner-side fail-retry is disabled. Rate-limit retries
+// were removed in ADR-0013 — executors return *runner.LimitError on
+// the first hit and the orchestrator decides whether quorum still
+// holds.
 //
 // AllowedTools and PermissionMode are the ADR-0010 hooks the v2 debate
 // engine uses to grant experts WebSearch/WebFetch during R1 and R2.
@@ -73,7 +78,7 @@ type Request struct {
 // Response is what Execute returns on a non-error completion. ExitCode
 // is the subprocess's exit status (always 0 for the success path; the
 // non-zero path returns an error from pkg/runner). Duration is wall-clock
-// time including any rate-limit retries swallowed inside pkg/runner.
+// time of the single subprocess invocation.
 type Response struct {
 	ExitCode int
 	Duration time.Duration

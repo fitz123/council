@@ -162,7 +162,7 @@ Transcripts always land in the session folder, regardless of `-v`.
 | Code | Meaning                                                                            |
 |------|------------------------------------------------------------------------------------|
 | 0    | Success — winner's R2 body printed to stdout, `verdict.json` written.              |
-| 1    | Config / validation error, injection suspected in question, or no resumable session. |
+| 1    | Config / validation error, preflight failure (an expert's CLI binary is not on `$PATH`), injection suspected in question, or no resumable session. |
 | 2    | Quorum not met (R1 or R2), or no consensus (ballots tied).                         |
 | 6    | Rate-limit quorum failure — quorum unmet because ≥1 vendor was rate-limited; per-CLI help footer printed to stderr (see [ADR-0013](docs/adr/0013-no-runner-ratelimit-retries.md)). |
 | 130  | Interrupted by SIGINT/SIGTERM. Partial `verdict.json` is written; no root `.done`. |

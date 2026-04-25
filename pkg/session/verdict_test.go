@@ -128,7 +128,8 @@ func TestVerdict_V2_Shape(t *testing.T) {
 	}
 	switch v.Status {
 	case "ok", "no_consensus", "quorum_failed_round_1", "quorum_failed_round_2",
-		"injection_suspected_in_question", "config_error", "interrupted", "error":
+		"rate_limit_quorum_failed", "injection_suspected_in_question",
+		"config_error", "interrupted", "error":
 	default:
 		t.Errorf("Status = %q, not a v2-valid terminal value", v.Status)
 	}
