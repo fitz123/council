@@ -1,6 +1,17 @@
 # ADR-0005: Single model/CLI at MVP; multiple expert personas
 
-**Status:** Proposed.
+**Status:** Superseded by ADR-0012 (2026-04-25).
+
+> v3 lifts the single-CLI constraint this ADR preserved through v1
+> and v2; it also relaxes validation to allow `len(experts) == 1`
+> (so `council init` can write a working profile when only one CLI
+> is authed on the host). See `docs/adr/0012-multi-cli-executors.md`
+> for the cross-vendor executor design and `docs/plans/2026-04-25-v3-multi-cli.md`
+> Task 7 for the validator change. The text below is retained for
+> historical continuity and for the original MVP rationale for
+> preferring N≥2 expert profiles — a preference v3 honors in its
+> default `council init` output (quorum = min(2, N)) even though
+> the validator no longer enforces N≥2 as a hard invariant.
 
 ## Context
 
