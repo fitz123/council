@@ -111,13 +111,14 @@ if containsWebTool(req.AllowedTools) {
 - **Env:** inherit `os.Environ()`. Codex reads auth from
   `~/.codex/auth.json` or env (OpenAI API key).
 - **BinaryName:** `"codex"`.
-- **Rate-limit markers** (source: `codex-rs/protocol/src/error.rs`):
+- **Rate-limit markers** (source: `codex-rs/protocol/src/error.rs`;
+  substring match only — no regex fallback per strict-YAGNI; a
+  future un-matched 429 is a one-line PR to extend this list):
   1. `you've hit your usage limit`
   2. `quota exceeded. check your plan`
   3. `selected model is at capacity`
   4. `exceeded retry limit, last status: 429`
   5. `upgrade to plus to continue`
-  6. fallback regex: `(?i)rate[_ ]?limit|insufficient_quota|usage_limit_reached`
 - **HelpCmd:** `codex /status`.
 
 ### Gemini
