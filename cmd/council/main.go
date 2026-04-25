@@ -490,18 +490,20 @@ func logEnd(w io.Writer, sess *session.Session, v *session.Verdict) {
 	fmt.Fprintf(w, "[%s] session folder: %s\n", ts, sess.Path)
 }
 
-// logArtifacts dumps each expert's round output and the ballot table to w
-// after the timing summary. Lets a verbose run answer "who said what and
-// who voted for whom" without having to open files in the session folder.
-// Skipped silently if the verdict is missing rounds (orchestrator failed
-// before R1 finished) or if a per-expert output.md is unreadable.
+// logArtifacts dumps each expert's round output and per-voter ballot blocks
+// to w after the timing summary. Lets a verbose run answer "who said what
+// and who voted for whom" without having to open files in the session folder.
+// Each section is independent: rounds with no readable output.md are skipped,
+// individual unreadable per-expert output.md files are skipped, and the
+// ballot section emits whenever v.Voting.Ballots is populated even if no
+// rounds completed (e.g. resumed session that only re-ran the voting stage).
 func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 	if v == nil || sess == nil {
 		return
 	}
 	for idx, r := range v.Rounds {
 		for _, e := range r.Experts {
-			path := filepath.Join(sess.Path, "rounds", fmt.Sprintf("%d", idx+1), "experts", e.Label, "output.md")
+			path := filepath.Join(sess.RoundExpertDir(idx+1, e.Label), "output.md")
 			body, err := os.ReadFile(path)
 			if err != nil {
 				continue
