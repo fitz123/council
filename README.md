@@ -4,6 +4,8 @@ Multi-expert CLI committee. Fan out one question to N expert CLI-instances, run 
 
 **Status:** v2 — debate engine with anonymized multi-round rounds and distributed voting.
 
+📖 **Plain-language overview (Russian):** [Council — как мы заставляем нейросети спорить](https://luck-eyeliner-26a.notion.site/Council-34d33f60dc7d8119a24fdeb30d3a5349?pvs=74) — what Council does, why voting instead of a judge, and the research backing each design decision.
+
 ## Why
 
 A single opinion from a single LLM is noisy. Running the same question through multiple expert personas, letting them critique each other's drafts in a second round, and then voting among them removes single-model bias without reintroducing a judge. Inspired by:
