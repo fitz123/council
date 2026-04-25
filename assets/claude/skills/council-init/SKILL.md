@@ -64,16 +64,19 @@ subset of CLIs is actually verified, and the embedded fallback is claude-only.
 
 ## Step 3: Run init
 
-Run synchronously (init is fast — it's just a probe + file write):
+Run synchronously (init is fast — it's just a probe + file write). Strip
+`CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` so the live-probe of the
+`claude-code` executor (which spawns `claude -p`) does not trip the nested-CLI
+guard:
 
 ```bash
-council init
+env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT council init
 ```
 
 …or, if the user picked "Regenerate" in Step 1:
 
 ```bash
-council init --force
+env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT council init --force
 ```
 
 Report any verified / skipped CLIs from the command's stderr output. Skipped
