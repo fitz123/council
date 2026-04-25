@@ -3,6 +3,9 @@
   "owner": {
     "name": "fitz123"
   },
+  "metadata": {
+    "description": "Single-plugin marketplace for council — multi-expert CLI committee with two-round debate and distributed voting"
+  },
   "plugins": [
     {
       "name": "council",
