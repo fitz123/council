@@ -43,6 +43,12 @@ func (r *stderrReporter) OnStageDone(e debate.StageEvent) {
 		r.renderRoundExpert(e)
 	case "ballot":
 		r.renderBallot(e)
+	default:
+		// StageEvent.Kind is intentionally additive — a future stage type
+		// could land in pkg/debate without the renderer growing an arm
+		// for it. Surface the skip rather than silently dropping events
+		// so the operator notices that --verbose has gone partial.
+		fmt.Fprintf(r.w, "[%s] warning: skipped unknown stage kind %q\n", nowStamp(), e.Kind)
 	}
 }
 

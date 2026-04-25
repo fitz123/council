@@ -296,11 +296,14 @@ func TestStderrReporter_StripsControlBytes(t *testing.T) {
 		rep.OnStageDone(ev)
 		got := buf.String()
 		// Raw ESC, BEL, and C1 CSI must be replaced; the surrounding
-		// printable text must survive. Use rune escapes (\u…) not byte
-		// escapes (\x…) so the search set is U+001B, U+0007, U+009B —
-		// not U+FFFD via invalid-UTF-8 byte decoding, which would match
-		// the replacement character itself.
-		if strings.ContainsAny(got, "") {
+		// printable text must survive. Use Go rune escapes (\u00xx) not
+		// byte escapes (\x..) so the search set is the THREE runes
+		// U+001B / U+0007 / U+009B — not U+FFFD via invalid-UTF-8
+		// byte decoding, which would match the replacement character
+		// itself and produce a self-fulfilling test failure. Avoiding
+		// raw control bytes in the source also keeps the file safe
+		// from editor / terminal mangling.
+		if strings.ContainsAny(got, "\u001b\u0007\u009b") {
 			t.Errorf("unsanitized control byte present in render:\n%q", got)
 		}
 		if !strings.Contains(got, "�") {
@@ -327,7 +330,12 @@ func TestStderrReporter_ConcurrentSafe(t *testing.T) {
 		i := i
 		go func() {
 			defer wg.Done()
-			label := string(rune('A' + (i % 26)))
+			// Unique label per goroutine — single-letter labels would
+			// repeat (n > 26) and let the test pass even if blocks
+			// interleaved between two calls that happened to share a
+			// label. Multi-character labels per voter make every header
+			// + body pair uniquely identifiable.
+			label := fmt.Sprintf("voter-%02d", i)
 			rep.OnStageDone(debate.StageEvent{
 				Kind: "round-expert", Round: 1, Label: label, RealName: "exp",
 				Body: []byte("body for " + label), Participation: "ok",
@@ -344,7 +352,9 @@ func TestStderrReporter_ConcurrentSafe(t *testing.T) {
 		if !strings.HasPrefix(line, "=== round 1 expert ") {
 			continue
 		}
-		// Find the label inside this header.
+		// Find the label inside this header. Sscanf with %s reads up to
+		// the next whitespace, which works because our unique labels
+		// (voter-NN) don't contain spaces.
 		var label string
 		if _, err := fmt.Sscanf(line, "=== round 1 expert %s", &label); err != nil {
 			t.Fatalf("could not parse header label from %q", line)

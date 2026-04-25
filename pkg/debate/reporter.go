@@ -27,9 +27,10 @@ type Reporter interface {
 	OnStageDone(StageEvent)
 }
 
-// StageEvent is the per-stage payload. Kind discriminates the three event
-// shapes; consumers switch on it and read only the fields relevant to that
-// shape.
+// StageEvent is the per-stage payload. Kind discriminates the two event
+// kinds ("round-expert" and "ballot"); within "round-expert", Round
+// distinguishes the round-1 and round-2 shapes. Consumers switch on Kind
+// and read only the fields relevant to that shape.
 //
 // Body is the raw subprocess stdout (output.md or votes/<label>.txt) the
 // debate package already loaded for the forgery scan. It carries through
