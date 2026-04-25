@@ -71,9 +71,9 @@ aliases work without translation.
   recorded in the executor for interface compat but does not change
   argv.
 - gemini-cli: PermissionMode `bypassPermissions` → write the
-  embedded policy TOML to `$GEMINI_CLI_HOME/policy.toml` and append
-  `--policy $GEMINI_CLI_HOME/policy.toml` to argv. Empty
-  PermissionMode → no policy file written, no `--policy` flag;
+  embedded policy TOML to an ephemeral per-call tmp dir and append
+  `--policy <that path>` to argv. Empty PermissionMode → no policy
+  file written, no `--policy` flag;
   gemini's default-deny on `web_fetch` in headless applies (which
   is exactly what ballot subprocesses want). Chosen over `--yolo`
   because `--yolo` emits a deprecation warning in gemini 0.38.2
@@ -132,11 +132,13 @@ argv := []string{
 }
 // Translation: when PermissionMode == bypassPermissions (the
 // webfetch expert-path signal), write embedded policy TOML to
-// $GEMINI_CLI_HOME/policy.toml and pass --policy. Empty →
-// nothing added; gemini's default-deny on web_fetch in headless
-// applies (ballot invariant).
+// a fresh ephemeral tmp dir and pass --policy. Empty → nothing
+// added; gemini's default-deny on web_fetch in headless applies
+// (ballot invariant).
 if req.PermissionMode == "bypassPermissions" {
-    policyPath := filepath.Join(tmpHome, "policy.toml")
+    tmpDir, _ := os.MkdirTemp("", "gemini-policy-*")
+    defer os.RemoveAll(tmpDir)
+    policyPath := filepath.Join(tmpDir, "policy.toml")
     if err := os.WriteFile(policyPath, []byte(geminiPolicyTOML), 0o600); err != nil {
         return executor.Response{}, fmt.Errorf("gemini: write policy: %w", err)
     }
@@ -155,13 +157,18 @@ priority = 100
 ```
 
 - **MapModel:** identity.
-- **Env:** inherit (plus `GEMINI_CLI_HOME=<ephemeral tmp dir>` set
-  per-call by the executor for no-session-persistence parity). No
-  API-key env var — auth is OAuth against the user's Google
+- **Env:** inherit. We do NOT set `GEMINI_CLI_HOME`: gemini-cli
+  treats it as the parent of `.gemini/` (where OAuth creds live),
+  so redirecting it to a fresh dir would mask the user's
+  `~/.gemini/oauth_creds.json` and fail every call with "Please
+  set an Auth method". Auth is OAuth against the user's Google
   subscription (set up once via gemini's login flow; credentials
-  cached under `~/.gemini/`). Known upstream bug #22648: OAuth-
-  personal can infinite-loop on 429 — mitigated by our per-expert
-  timeout + runner SIGTERM/SIGKILL.
+  cached under `~/.gemini/`). Headless `-p` mode is already
+  stateless enough for our purposes; only the policy file needs
+  an ephemeral home (a per-call tmp dir, removed on return).
+  Known upstream bug #22648: OAuth-personal can infinite-loop on
+  429 — mitigated by our per-expert timeout + runner
+  SIGTERM/SIGKILL.
 - **BinaryName:** `"gemini"`.
 - **Rate-limit markers** (source:
   `packages/core/src/utils/googleQuotaErrors.ts`):
@@ -210,9 +217,9 @@ forward-compatible surface per
 
 **h') Policy Engine via `--policy <file>`.** Chosen. Executor
 writes a 4-line TOML (`[[rule]] toolName=["google_web_search",
-"web_fetch"] decision="allow" priority=100`) to
-`$GEMINI_CLI_HOME/policy.toml` per call (the ephemeral home
-already exists for session-persistence). Passes `--policy <that
+"web_fetch"] decision="allow" priority=100`) to a per-call
+ephemeral tmp dir (`os.MkdirTemp` + `defer os.RemoveAll`).
+Passes `--policy <that
 path>` in argv. No deprecation warnings. No `--yolo`. Clean stdout.
 Smoke-verified 2026-04-25.
 
@@ -297,7 +304,7 @@ Append to v2.md §8:
 | F24 | Live-probe gate | Mock CLI failing probe excluded from generated profile |
 | F25 | Literal model IDs pass through | `model: gpt-5.5` → `codex exec -m gpt-5.5 ...` (identity MapModel) |
 | F26 | Codex enables web_search when AllowedTools contains web | `AllowedTools=["WebSearch"]` → argv contains `-c tools.web_search=true`. `AllowedTools=nil` → NO such flag |
-| F27 | Gemini writes policy + emits --policy when PermissionMode is bypassPermissions | `PermissionMode="bypassPermissions"` → `$GEMINI_CLI_HOME/policy.toml` exists with the allow-rule body; argv contains `--policy <that path>`. Empty PermissionMode → NO policy file, NO `--policy` flag; argv does NOT contain `--allowed-tools` or `--yolo` (both deprecated) |
+| F27 | Gemini writes policy + emits --policy when PermissionMode is bypassPermissions | `PermissionMode="bypassPermissions"` → policy.toml exists in an ephemeral per-call tmp dir with the allow-rule body; argv contains `--policy <that path>`. Empty PermissionMode → NO policy file, NO `--policy` flag; argv does NOT contain `--allowed-tools` or `--yolo` (both deprecated). Executor must not set `$GEMINI_CLI_HOME` (would mask user OAuth creds at `~/.gemini/`) |
 | F28 | Claude routing unchanged | Existing webfetch F13/F14 still pass for claudecode executor |
 | F29 | Live codex smoke — fetches a URL | `COUNCIL_LIVE_CODEX=1` gated test: prompt "cite current Go version with URL", assert stdout contains `https://` |
 | F30 | Live gemini smoke — fetches a URL | `COUNCIL_LIVE_GEMINI=1` gated test: same question, assert stdout contains `https://` |

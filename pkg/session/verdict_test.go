@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -127,7 +128,8 @@ func TestVerdict_V2_Shape(t *testing.T) {
 	}
 	switch v.Status {
 	case "ok", "no_consensus", "quorum_failed_round_1", "quorum_failed_round_2",
-		"injection_suspected_in_question", "config_error", "interrupted", "error":
+		"rate_limit_quorum_failed", "injection_suspected_in_question",
+		"config_error", "interrupted", "error":
 	default:
 		t.Errorf("Status = %q, not a v2-valid terminal value", v.Status)
 	}
@@ -266,6 +268,63 @@ func TestVerdict_F12_WinnerXorTied(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestVerdict_RateLimitsOmittedWhenEmpty asserts the omitempty contract on
+// the new RateLimits field: the canonical happy-path verdict must not grow a
+// "rate_limits" JSON key. Without omitempty (or with `[]session.RateLimitEntry{}`
+// instead of nil), the canonical bytes-exact fixture would drift on every
+// run.
+func TestVerdict_RateLimitsOmittedWhenEmpty(t *testing.T) {
+	v := canonicalVerdict()
+	if len(v.RateLimits) != 0 {
+		t.Fatalf("canonical verdict already has RateLimits set; test premise broken")
+	}
+	buf, err := marshalVerdict(v)
+	if err != nil {
+		t.Fatalf("marshalVerdict: %v", err)
+	}
+	if strings.Contains(string(buf), "rate_limits") {
+		t.Errorf("rate_limits key present in happy-path verdict bytes:\n%s", buf)
+	}
+}
+
+// TestVerdict_RateLimitsRoundTrip pins the wire shape of a populated
+// rate_limits[] entry: each field is rendered with the documented JSON tag
+// and round-trips through encode/decode without loss. This is the unit-level
+// counterpart to F26 (verdict.json carries rate_limits[] when a CLI hits its
+// quota mid-debate).
+func TestVerdict_RateLimitsRoundTrip(t *testing.T) {
+	v := canonicalVerdict()
+	v.RateLimits = []RateLimitEntry{
+		{Executor: "codex", Pattern: "you've hit your usage limit", HelpCmd: "codex /status", Round: 1, Expert: "B"},
+		{Executor: "gemini-cli", Pattern: "RESOURCE_EXHAUSTED", HelpCmd: "check https://aistudio.google.com/apikey for quota and billing", Round: 2, Expert: "C"},
+	}
+	buf, err := marshalVerdict(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var generic map[string]any
+	if err := json.Unmarshal(buf, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rls, ok := generic["rate_limits"].([]any)
+	if !ok {
+		t.Fatalf("rate_limits key missing or not an array; got %T", generic["rate_limits"])
+	}
+	if len(rls) != 2 {
+		t.Fatalf("rate_limits length = %d, want 2", len(rls))
+	}
+	first := rls[0].(map[string]any)
+	for _, key := range []string{"executor", "pattern", "help_cmd", "round", "expert"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("rate_limits[0] missing key %q: %v", key, first)
+		}
+	}
+	if first["executor"] != "codex" {
+		t.Errorf("rate_limits[0].executor = %v, want codex", first["executor"])
 	}
 }
 

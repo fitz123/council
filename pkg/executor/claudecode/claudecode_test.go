@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fitz123/council/pkg/executor"
+	"github.com/fitz123/council/pkg/runner"
 )
 
 // writeStub drops a small POSIX-shell script in t.TempDir that:
@@ -74,10 +76,10 @@ func TestExecuteHappyPath(t *testing.T) {
 	got, _ := os.ReadFile(out)
 	gotStr := string(got)
 
-	// argv assertion: must contain the four flag tokens in the right
+	// argv assertion: must contain the flag tokens in the right
 	// order. We assert on a substring rather than the full line so
 	// future additions (a verbose flag, etc.) don't break the test.
-	wantArgv := "-p - --model sonnet --output-format text"
+	wantArgv := "-p - --model sonnet --output-format text --no-session-persistence"
 	if !strings.Contains(gotStr, "ARGV: "+wantArgv) {
 		t.Errorf("argv mismatch.\ngot:  %q\nwant substring: %q", gotStr, wantArgv)
 	}
@@ -200,6 +202,22 @@ func TestNameIsStable(t *testing.T) {
 	}
 }
 
+func TestBinaryNameIsClaude(t *testing.T) {
+	// Preflight (cmd/council/preflight.go) does exec.LookPath against
+	// BinaryName(). The registry key (`claude-code`) is not a valid
+	// binary name — the actual executable is `claude`. The test-only
+	// Binary override on the struct is irrelevant to the preflight
+	// contract: BinaryName must always return "claude".
+	c := &ClaudeCode{}
+	if got := c.BinaryName(); got != "claude" {
+		t.Errorf("BinaryName() = %q, want claude", got)
+	}
+	cWithOverride := &ClaudeCode{Binary: "/tmp/stub"}
+	if got := cWithOverride.BinaryName(); got != "claude" {
+		t.Errorf("BinaryName() with override Binary = %q, want claude", got)
+	}
+}
+
 func TestInitRegistersClaudeCode(t *testing.T) {
 	// importing this package must register "claude-code" via init().
 	got, err := executor.Get("claude-code")
@@ -227,10 +245,10 @@ func TestExecuteEmitsToolFlagsConditionally(t *testing.T) {
 		wantAbsent     []string
 	}{
 		{
-			name:           "empty preserves v1 argv",
+			name:           "empty preserves base argv",
 			allowedTools:   nil,
 			permissionMode: "",
-			wantContains:   []string{"-p - --model sonnet --output-format text"},
+			wantContains:   []string{"-p - --model sonnet --output-format text --no-session-persistence"},
 			wantAbsent:     []string{"--allowedTools", "--permission-mode"},
 		},
 		{
@@ -306,6 +324,54 @@ func TestExecuteEmitsToolFlagsConditionally(t *testing.T) {
 	}
 }
 
+// TestExecuteAlwaysEmitsNoSessionPersistence locks in the unconditional
+// emission of --no-session-persistence: the flag must appear in argv on
+// every call regardless of AllowedTools/PermissionMode shape, including
+// the ballot path which hard-codes both fields to zero. Council is a
+// one-shot orchestrator; persisting session state across invocations
+// would leak prior-question context.
+func TestExecuteAlwaysEmitsNoSessionPersistence(t *testing.T) {
+	cases := []struct {
+		name           string
+		allowedTools   []string
+		permissionMode string
+	}{
+		{name: "ballot path (both zero)", allowedTools: nil, permissionMode: ""},
+		{name: "tools-enabled path", allowedTools: []string{"WebSearch", "WebFetch"}, permissionMode: "bypassPermissions"},
+		{name: "tools only", allowedTools: []string{"WebSearch"}, permissionMode: ""},
+		{name: "permission only", allowedTools: nil, permissionMode: "bypassPermissions"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := writeStub(t)
+			c := &ClaudeCode{Binary: stub}
+
+			tmp := t.TempDir()
+			out := filepath.Join(tmp, "out")
+			errf := filepath.Join(tmp, "err")
+
+			_, err := c.Execute(context.Background(), executor.Request{
+				Prompt:         "x",
+				Model:          "sonnet",
+				Timeout:        5 * time.Second,
+				StdoutFile:     out,
+				StderrFile:     errf,
+				AllowedTools:   tc.allowedTools,
+				PermissionMode: tc.permissionMode,
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			got, _ := os.ReadFile(out)
+			gotStr := string(got)
+			if !strings.Contains(gotStr, "--no-session-persistence") {
+				t.Errorf("argv missing --no-session-persistence\ngot: %q", gotStr)
+			}
+		})
+	}
+}
+
 func TestExecutePropagatesNonZeroExit(t *testing.T) {
 	// stub that exits non-zero — exercises the runner-error pass-through.
 	dir := t.TempDir()
@@ -331,5 +397,61 @@ exit 42
 	}
 	if resp.ExitCode != 42 {
 		t.Errorf("ExitCode = %d, want 42", resp.ExitCode)
+	}
+	// Generic non-zero exit must NOT be classified as a rate-limit error —
+	// the orchestrator routes *LimitError into the absorb-by-quorum path,
+	// while everything else stays a normal failure.
+	var le *runner.LimitError
+	if errors.As(err, &le) {
+		t.Errorf("non-rate-limit exit classified as LimitError: %v", err)
+	}
+}
+
+// TestExecuteWrapsRateLimitMarkers verifies ADR-0013's executor-side
+// rate-limit detection: when the captured stderr contains any of the
+// claudeLimitPatterns, the executor wraps the runner error into a
+// *runner.LimitError with Tool="claude-code", HelpCmd="claude /usage",
+// and Pattern set to the matched substring.
+func TestExecuteWrapsRateLimitMarkers(t *testing.T) {
+	for _, pattern := range claudeLimitPatterns {
+		t.Run(pattern, func(t *testing.T) {
+			dir := t.TempDir()
+			stub := filepath.Join(dir, "stub.sh")
+			// Embed the pattern verbatim into the stub's stderr so
+			// DetectLimit's case-insensitive substring scan finds it.
+			// Write the pattern to a sibling file the script `cat`s to
+			// stderr — sidesteps shell-quoting issues for patterns that
+			// contain apostrophes ("you've hit your limit").
+			markerPath := filepath.Join(dir, "marker.txt")
+			if err := os.WriteFile(markerPath, []byte(pattern+"\n"), 0o644); err != nil {
+				t.Fatalf("write marker: %v", err)
+			}
+			body := "#!/bin/sh\ncat " + markerPath + " >&2\nexit 1\n"
+			if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
+				t.Fatalf("write stub: %v", err)
+			}
+			c := &ClaudeCode{Binary: stub}
+
+			_, err := c.Execute(context.Background(), executor.Request{
+				Prompt:     "x",
+				Model:      "sonnet",
+				Timeout:    5 * time.Second,
+				StdoutFile: filepath.Join(dir, "out"),
+				StderrFile: filepath.Join(dir, "err"),
+			})
+			var le *runner.LimitError
+			if !errors.As(err, &le) {
+				t.Fatalf("err = %v, want *runner.LimitError", err)
+			}
+			if le.Tool != "claude-code" {
+				t.Errorf("LimitError.Tool = %q, want claude-code", le.Tool)
+			}
+			if le.HelpCmd != claudeHelpCmd {
+				t.Errorf("LimitError.HelpCmd = %q, want %q", le.HelpCmd, claudeHelpCmd)
+			}
+			if le.Pattern != pattern {
+				t.Errorf("LimitError.Pattern = %q, want %q", le.Pattern, pattern)
+			}
+		})
 	}
 }

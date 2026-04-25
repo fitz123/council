@@ -225,11 +225,12 @@ func buildProfile(y *yamlProfile, resolveBase string, readFile readFileFn) (*Pro
 	if y.Rounds != 2 {
 		return nil, fmt.Errorf("rounds must be 2 (v2 ships K=2 only; K=1 and K>=3 deferred to v3), got %d", y.Rounds)
 	}
-	// Debate requires >= 2 voices (R1 + R2 + voting all need at least two
-	// candidates to compare). v1 ADR-0005 set the same floor for the judged
-	// flow; v2 keeps it.
-	if len(y.Experts) < 2 {
-		return nil, fmt.Errorf("experts must have at least 2 entries (debate requires >= 2 voices), got %d", len(y.Experts))
+	// v3 relaxes the v1/v2 floor of >= 2 experts. `council init` may write a
+	// 1-expert profile when the host has only one CLI authed (single-vendor
+	// fallback) — debate degenerates to "trust the one survivor" but the
+	// session pipeline still produces a valid verdict.
+	if len(y.Experts) < 1 {
+		return nil, fmt.Errorf("experts must have at least 1 entry, got %d", len(y.Experts))
 	}
 
 	experts := make([]RoleConfig, 0, len(y.Experts))

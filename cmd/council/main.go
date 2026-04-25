@@ -40,12 +40,15 @@ var version = ""
 // Exit codes per docs/design/v2.md §4. Kept as named constants so test
 // assertions read self-documenting rather than bare integers. v2 drops the
 // judge role, so exit 3 is retired; the tie path ("no_consensus") folds
-// into exit 2 alongside quorum-failed runs.
+// into exit 2 alongside quorum-failed runs. v3 adds exit 6 for the
+// rate-limit-induced quorum failure (ADR-0013) so a vendor outage is
+// distinguishable from a real disagreement at the shell level.
 const (
-	exitOK          = 0
-	exitConfigError = 1
-	exitQuorum      = 2
-	exitInterrupted = 130
+	exitOK                  = 0
+	exitConfigError         = 1
+	exitQuorum              = 2
+	exitRateLimitQuorumFail = 6
+	exitInterrupted         = 130
 )
 
 // resumeSubcommand is the literal first-positional that switches `council`
@@ -71,10 +74,12 @@ func main() {
 // returns ErrInterrupted is what lets us exit 130 immediately without a
 // second flush step here.
 func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// Subcommand dispatch: `council resume [--session <id>]` continues an
-	// already-materialised session. Detected before flag parsing so the
-	// resume flag set can carry its own --session option without
-	// colliding with the main flag set's -p / -v / --version.
+	// Subcommand dispatch. Detected before flag parsing so each
+	// subcommand's flag set can carry its own options without colliding
+	// with the main flag set's -p / -v / --version.
+	if len(argv) > 0 && argv[0] == initSubcommand {
+		return runInit(argv[1:], stdout, stderr)
+	}
 	if len(argv) > 0 && argv[0] == resumeSubcommand {
 		return runResume(ctx, argv[1:], stdout, stderr)
 	}
@@ -153,6 +158,15 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		return exitConfigError
 	}
 
+	// Preflight: every expert's BinaryName resolves on PATH. Without
+	// this, a missing CLI surfaces as N near-identical "exec: ... not
+	// found" lines deep inside debate.Run instead of one up-front
+	// failure naming the binary and the offending profile line.
+	if err := Preflight(profile); err != nil {
+		fmt.Fprintf(stderr, "council: %v\n", err)
+		return exitConfigError
+	}
+
 	nonce, err := debate.GenerateNonce()
 	if err != nil {
 		fmt.Fprintf(stderr, "council: generate session nonce: %v\n", err)
@@ -190,6 +204,10 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 	case errors.Is(err, orchestrator.ErrInjectionInQuestion):
 		fmt.Fprintf(stderr, "council: injection suspected in question (see %s/verdict.json)\n", sess.Path)
 		return exitConfigError
+	case errors.Is(err, debate.ErrRateLimitQuorumFail):
+		fmt.Fprintf(stderr, "council: quorum not met due to rate limits (see %s/verdict.json)\n", sess.Path)
+		writeRateLimitFooter(stderr, v)
+		return exitRateLimitQuorumFail
 	case errors.Is(err, debate.ErrQuorumFailedR1):
 		fmt.Fprintf(stderr, "council: round 1 quorum not met (see %s/verdict.json)\n", sess.Path)
 		return exitQuorum
@@ -308,6 +326,10 @@ func runResume(ctx context.Context, argv []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "council resume: %v\n", err)
 		return exitConfigError
 	}
+	if err := Preflight(profile); err != nil {
+		fmt.Fprintf(stderr, "council resume: %v\n", err)
+		return exitConfigError
+	}
 
 	v, err := orchestrator.Run(ctx, profile, question, sess)
 	switch {
@@ -320,6 +342,10 @@ func runResume(ctx context.Context, argv []string, stdout, stderr io.Writer) int
 	case errors.Is(err, orchestrator.ErrInjectionInQuestion):
 		fmt.Fprintf(stderr, "council resume: injection suspected in question (see %s/verdict.json)\n", sess.Path)
 		return exitConfigError
+	case errors.Is(err, debate.ErrRateLimitQuorumFail):
+		fmt.Fprintf(stderr, "council resume: quorum not met due to rate limits (see %s/verdict.json)\n", sess.Path)
+		writeRateLimitFooter(stderr, v)
+		return exitRateLimitQuorumFail
 	case errors.Is(err, debate.ErrQuorumFailedR1):
 		fmt.Fprintf(stderr, "council resume: round 1 quorum not met (see %s/verdict.json)\n", sess.Path)
 		return exitQuorum
@@ -395,6 +421,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   council [flags] "question"
   council [flags] -          # read question from stdin (until EOF)
+  council init [--force]
   council resume [--session ID]
   council --version
   council --help
@@ -405,6 +432,8 @@ Flags:
       --version        Print version and exit.
 
 Subcommands:
+  init                 Probe installed CLIs and write ~/.config/council/default.yaml
+                       with one expert per verified CLI. Idempotent without --force.
   resume               Continue the newest incomplete session, or the one named
                        by --session. Re-runs any stage missing its .done marker.
 
@@ -412,6 +441,7 @@ Exit codes:
   0    success
   1    config / validation / injection error / no resumable session
   2    quorum not met, or no consensus (tied ballots)
+  6    quorum not met due to vendor rate-limits (per-CLI footer printed)
   130  interrupted (SIGINT/SIGTERM)`)
 }
 
@@ -477,3 +507,24 @@ func displaySource(source string, sess *session.Session) string {
 // Indirected via a package var so tests can freeze the clock without
 // resorting to stdlib monkey-patching.
 var nowStamp = func() string { return time.Now().UTC().Format("15:04:05") }
+
+// writeRateLimitFooter prints one HelpCmd hint per UNIQUE executor in
+// v.RateLimits to w. The footer is appended to the rate-limit-quorum-fail
+// stderr branch (exit 6) so the operator gets a vendor-specific next-step
+// without having to open verdict.json. Order matches first-occurrence in the
+// slice; deduplication is by Executor field. v may be nil if the orchestrator
+// returned an error before writing any rounds — the function is a no-op in
+// that case so the surrounding case branch stays straight-line.
+func writeRateLimitFooter(w io.Writer, v *session.Verdict) {
+	if v == nil {
+		return
+	}
+	seen := make(map[string]bool, len(v.RateLimits))
+	for _, e := range v.RateLimits {
+		if seen[e.Executor] {
+			continue
+		}
+		seen[e.Executor] = true
+		fmt.Fprintf(w, "  %s: %s\n", e.Executor, e.HelpCmd)
+	}
+}

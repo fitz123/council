@@ -80,14 +80,20 @@ const timestampLayout = time.RFC3339
 // nonce baked into profile.snapshot.yaml.
 func Run(ctx context.Context, profile *config.Profile, question string, sess *session.Session) (*session.Verdict, error) {
 	// On resume, an "interrupted" verdict.json from the previous attempt
-	// carries the original run's started_at. Preserve it so duration_seconds
-	// reflects total wall-clock from session creation to final resolution
-	// rather than just the final resume segment. Parse errors / absence fall
-	// back to time.Now() — the common case is a fresh run with no prior
-	// verdict.
+	// carries the original run's started_at AND its rate_limits[]. Preserve
+	// both: started_at so duration_seconds reflects total wall-clock from
+	// session creation to final resolution; rate_limits so the audit trail
+	// (F33/F35) survives a resume boundary — re-running a round on resume
+	// short-circuits via .done/.failed/.carried markers without restoring
+	// in-memory LimitErr, so collectRoundLimits would otherwise produce an
+	// empty slice and the prior rate-limit entries would be lost. Parse
+	// errors / absence fall back to time.Now() with no prior limits — the
+	// common case is a fresh run with no prior verdict.
 	startedAt := time.Now().UTC()
-	if prior, ok := readInterruptedStartedAt(sess.Path); ok {
+	var priorLimits []session.RateLimitEntry
+	if prior, limits, ok := readInterruptedVerdictState(sess.Path); ok {
 		startedAt = prior
+		priorLimits = limits
 	}
 	v := &session.Verdict{
 		Version:     2,
@@ -96,6 +102,7 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 		Profile:     profile.Name,
 		Question:    question,
 		StartedAt:   startedAt.Format(timestampLayout),
+		RateLimits:  priorLimits,
 	}
 
 	// Stage 1: sanity-scan the operator question for fence-shaped lines.
@@ -134,10 +141,20 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 	// Stage 3: round 1 (blind fan-out).
 	r1, err := debate.RunRound1(ctx, rcfg, question)
 	v.Rounds = append(v.Rounds, buildRoundVerdict(r1, profile))
+	v.RateLimits = append(v.RateLimits, collectRoundLimits(r1, 1)...)
 	if ctx.Err() != nil {
 		return finalizeInterrupted(v, sess, startedAt)
 	}
 	if err != nil {
+		// ErrRateLimitQuorumFail is checked BEFORE the generic R1
+		// sentinel: the two are disjoint (debate exposes them as distinct
+		// errors so cmd/council can map only the rate-limit case to exit
+		// 6), but ordering the rate-limit branch first keeps the intent
+		// readable.
+		if errors.Is(err, debate.ErrRateLimitQuorumFail) {
+			v.Status = "rate_limit_quorum_failed"
+			return finalizeAndWrite(v, sess, startedAt, err)
+		}
 		if errors.Is(err, debate.ErrQuorumFailedR1) {
 			v.Status = "quorum_failed_round_1"
 			return finalizeAndWrite(v, sess, startedAt, err)
@@ -149,10 +166,15 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 	// Stage 4: round 2 (peer-aware, with carry-forward on per-expert fail).
 	r2, err := debate.RunRound2(ctx, rcfg, question, r1)
 	v.Rounds = append(v.Rounds, buildRoundVerdict(r2, profile))
+	v.RateLimits = append(v.RateLimits, collectRoundLimits(r2, 2)...)
 	if ctx.Err() != nil {
 		return finalizeInterrupted(v, sess, startedAt)
 	}
 	if err != nil {
+		if errors.Is(err, debate.ErrRateLimitQuorumFail) {
+			v.Status = "rate_limit_quorum_failed"
+			return finalizeAndWrite(v, sess, startedAt, err)
+		}
 		if errors.Is(err, debate.ErrQuorumFailedR2) {
 			v.Status = "quorum_failed_round_2"
 			return finalizeAndWrite(v, sess, startedAt, err)
@@ -179,6 +201,7 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 		MaxRetries: profile.MaxRetries,
 	}
 	ballots, err := debate.RunBallot(ctx, bcfg, question, string(aggregateMD))
+	v.RateLimits = append(v.RateLimits, collectBallotLimits(ballots)...)
 	if ctx.Err() != nil {
 		return finalizeInterrupted(v, sess, startedAt)
 	}
@@ -248,34 +271,38 @@ func finalizeInterrupted(v *session.Verdict, sess *session.Session, startedAt ti
 	return v, ErrInterrupted
 }
 
-// readInterruptedStartedAt recovers the original run's started_at from a
-// prior interrupted verdict.json in the session folder, used by resume to
-// preserve total wall-clock duration across the interrupt boundary. Only
-// verdicts with status="interrupted" are honoured — any other status means
-// the session is final (resume would refuse it) or the verdict is a prior
-// resume's own output being overwritten. Missing / unparseable / non-
-// interrupted verdicts return ok=false and the caller falls back to
-// time.Now(), preserving the fresh-run behaviour.
-func readInterruptedStartedAt(sessionPath string) (time.Time, bool) {
+// readInterruptedVerdictState recovers state from a prior interrupted
+// verdict.json that the resume path needs to thread into the new run:
+// the original started_at (for total wall-clock duration) and the prior
+// rate_limits[] (so the audit trail survives — round runners short-
+// circuit completed stages without restoring in-memory LimitErr, so
+// collectRoundLimits would drop these entries). Only verdicts with
+// status="interrupted" are honoured — any other status means the session
+// is final (resume would refuse it) or the verdict is a prior resume's
+// own output being overwritten. Missing / unparseable / non-interrupted
+// verdicts return ok=false and the caller falls back to time.Now() with
+// no prior limits, preserving the fresh-run behaviour.
+func readInterruptedVerdictState(sessionPath string) (time.Time, []session.RateLimitEntry, bool) {
 	data, err := os.ReadFile(filepath.Join(sessionPath, "verdict.json"))
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, nil, false
 	}
 	var v struct {
-		Status    string `json:"status"`
-		StartedAt string `json:"started_at"`
+		Status     string                   `json:"status"`
+		StartedAt  string                   `json:"started_at"`
+		RateLimits []session.RateLimitEntry `json:"rate_limits"`
 	}
 	if err := json.Unmarshal(data, &v); err != nil {
-		return time.Time{}, false
+		return time.Time{}, nil, false
 	}
 	if v.Status != "interrupted" || v.StartedAt == "" {
-		return time.Time{}, false
+		return time.Time{}, nil, false
 	}
 	t, err := time.Parse(timestampLayout, v.StartedAt)
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, nil, false
 	}
-	return t.UTC(), true
+	return t.UTC(), v.RateLimits, true
 }
 
 // finalize sets the end-timestamp and duration fields on v using the clock
@@ -434,4 +461,53 @@ func activeCohort(r2 []debate.RoundOutput, labeled []debate.LabeledExpert) ([]de
 
 func verdictSessionPath(id string) string {
 	return "./" + filepath.ToSlash(filepath.Join(".council", "sessions", id))
+}
+
+// collectRoundLimits walks a slice of debate.RoundOutput and returns one
+// session.RateLimitEntry per output whose LimitErr is non-nil. Round is the
+// 1-based round number stamped on each entry so verdict.json can carry an
+// audit trail across R1, R2, and the ballot stage. The slice is ordered by
+// expert label (matching the input slice's existing alphabetical order from
+// debate.RunRound1 / RunRound2) so verdict bytes stay stable across runs.
+func collectRoundLimits(outputs []debate.RoundOutput, round int) []session.RateLimitEntry {
+	out := make([]session.RateLimitEntry, 0)
+	for _, o := range outputs {
+		if o.LimitErr == nil {
+			continue
+		}
+		out = append(out, session.RateLimitEntry{
+			Executor: o.LimitErr.Tool,
+			Pattern:  o.LimitErr.Pattern,
+			HelpCmd:  o.LimitErr.HelpCmd,
+			Round:    round,
+			Expert:   o.Label,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// collectBallotLimits is the ballot-stage analogue of collectRoundLimits.
+// Round 0 is reserved for the ballot stage so verdict.json readers can
+// distinguish ballots from R1/R2 expert spawns when scanning rate_limits[].
+func collectBallotLimits(ballots []debate.Ballot) []session.RateLimitEntry {
+	out := make([]session.RateLimitEntry, 0)
+	for _, b := range ballots {
+		if b.LimitErr == nil {
+			continue
+		}
+		out = append(out, session.RateLimitEntry{
+			Executor: b.LimitErr.Tool,
+			Pattern:  b.LimitErr.Pattern,
+			HelpCmd:  b.LimitErr.HelpCmd,
+			Round:    0,
+			Expert:   b.VoterLabel,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

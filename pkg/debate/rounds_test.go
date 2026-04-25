@@ -27,7 +27,8 @@ type testExec struct {
 	attempts map[string]int
 }
 
-func (t *testExec) Name() string { return t.name }
+func (t *testExec) Name() string       { return t.name }
+func (t *testExec) BinaryName() string { return t.name }
 
 func (t *testExec) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	t.mu.Lock()
@@ -405,8 +406,8 @@ func TestRunRound1_GrantsWebTools(t *testing.T) {
 	// package-level constants in pkg/debate so a future profile field
 	// cannot accidentally downgrade the tools.
 	var (
-		mu      sync.Mutex
-		seen    = map[string]executor.Request{}
+		mu   sync.Mutex
+		seen = map[string]executor.Request{}
 	)
 	exec := &testExec{
 		name: testExecName,

@@ -13,6 +13,7 @@ import (
 	"github.com/fitz123/council/pkg/config"
 	"github.com/fitz123/council/pkg/debate"
 	"github.com/fitz123/council/pkg/executor"
+	"github.com/fitz123/council/pkg/runner"
 	"github.com/fitz123/council/pkg/session"
 )
 
@@ -26,7 +27,8 @@ type stubExec struct {
 	on        func(ctx context.Context, call int64, req executor.Request) (executor.Response, error)
 }
 
-func (s *stubExec) Name() string { return s.name }
+func (s *stubExec) Name() string       { return s.name }
+func (s *stubExec) BinaryName() string { return s.name }
 func (s *stubExec) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	n := atomic.AddInt64(&s.callCount, 1)
 	return s.on(ctx, n, req)
@@ -360,9 +362,9 @@ func TestRun_VerdictWriteFailurePreservesSentinel(t *testing.T) {
 			stage, label := classifyRequest(req)
 			switch stage {
 			case stageR1, stageR2:
-				return writeOK("body-" + label)(ctx, n, req)
+				return writeOK("body-"+label)(ctx, n, req)
 			case stageBallot:
-				return writeOK("VOTE: " + label + "\n")(ctx, n, req)
+				return writeOK("VOTE: "+label+"\n")(ctx, n, req)
 			}
 			return executor.Response{}, errors.New("unclassified")
 		},
@@ -540,6 +542,51 @@ func TestRun_ResumePreservesStartedAt(t *testing.T) {
 	}
 }
 
+// TestRun_ResumePreservesPriorRateLimits — a prior interrupted verdict.json
+// carries rate_limits[] entries from rate-limited experts whose failures
+// were absorbed by quorum. On resume, those experts short-circuit via
+// .failed (R1) or .done+.carried (R2) markers, so the in-memory LimitErr
+// is not restored and collectRoundLimits returns nothing for them. Without
+// preserving the prior entries, the audit trail promised by F33/F35 would
+// disappear across the resume boundary. Run must seed v.RateLimits from
+// the prior verdict so the final emit includes them.
+func TestRun_ResumePreservesPriorRateLimits(t *testing.T) {
+	register(t, &stubExec{name: "stub", on: writeOK("ok")})
+	p := newV2TestProfile("stub", []string{"a", "b"})
+	s := newV2Session(t, p, "q")
+
+	priorStart := "2020-01-02T03:04:05Z"
+	priorJSON := `{
+		"version": 2,
+		"status": "interrupted",
+		"started_at": "` + priorStart + `",
+		"rate_limits": [
+			{"executor": "gemini-cli", "pattern": "RESOURCE_EXHAUSTED", "help_cmd": "check https://aistudio.google.com/apikey for quota and billing", "round": 1, "expert": "A"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(s.Path, "verdict.json"), []byte(priorJSON), 0o644); err != nil {
+		t.Fatalf("seed verdict.json: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	v, err := Run(ctx, p, "q", s)
+	if !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("err = %v, want ErrInterrupted", err)
+	}
+	if len(v.RateLimits) != 1 {
+		t.Fatalf("len(RateLimits) = %d, want 1 (prior entry preserved across resume)", len(v.RateLimits))
+	}
+	got := v.RateLimits[0]
+	if got.Executor != "gemini-cli" || got.Pattern != "RESOURCE_EXHAUSTED" || got.Round != 1 || got.Expert != "A" {
+		t.Errorf("preserved entry mismatch: %+v", got)
+	}
+	body := readVerdict(t, s)
+	if !strings.Contains(body, `"pattern": "RESOURCE_EXHAUSTED"`) {
+		t.Errorf("verdict.json missing preserved rate_limit entry: %s", body)
+	}
+}
+
 // TestRun_FreshRunIgnoresNonInterruptedPriorVerdict — if verdict.json is
 // present but its status is not "interrupted" (e.g. stale "ok" from a
 // session directory the operator has reused), Run must use time.Now()
@@ -561,6 +608,119 @@ func TestRun_FreshRunIgnoresNonInterruptedPriorVerdict(t *testing.T) {
 	v, _ := Run(ctx, p, "q", s)
 	if v.StartedAt == priorStart {
 		t.Errorf("StartedAt = %q, want fresh time.Now() (non-interrupted prior must not be reused)", v.StartedAt)
+	}
+}
+
+// TestRun_RateLimitQuorumFail_PopulatesVerdict covers the orchestrator wiring
+// added for ADR-0013: when every R1 expert returns *runner.LimitError, the
+// run resolves with status="rate_limit_quorum_failed", v.RateLimits has one
+// entry per expert (executor/pattern/help_cmd/round/expert all populated),
+// and the returned error matches debate.ErrRateLimitQuorumFail (NOT
+// ErrQuorumFailedR1, since the two sentinels are intentionally disjoint).
+func TestRun_RateLimitQuorumFail_PopulatesVerdict(t *testing.T) {
+	stub := &stubExec{
+		name: "stub",
+		on: func(ctx context.Context, _ int64, req executor.Request) (executor.Response, error) {
+			stage, _ := classifyRequest(req)
+			if stage != stageR1 {
+				t.Errorf("ballot/R2 spawn after R1 quorum fail: %s", req.StdoutFile)
+				return executor.Response{}, errors.New("unexpected stage")
+			}
+			_ = os.WriteFile(req.StderrFile, []byte("rate limited\n"), 0o644)
+			return executor.Response{ExitCode: 1}, &runner.LimitError{
+				Tool:    "claude-code",
+				Pattern: "anthropic rate limit",
+				HelpCmd: "claude /usage",
+			}
+		},
+	}
+	register(t, stub)
+
+	p := newV2TestProfile("stub", []string{"e1", "e2", "e3"})
+	p.Quorum = 2
+	s := newV2Session(t, p, "q")
+
+	v, err := Run(context.Background(), p, "q", s)
+	if !errors.Is(err, debate.ErrRateLimitQuorumFail) {
+		t.Fatalf("err = %v, want ErrRateLimitQuorumFail", err)
+	}
+	if errors.Is(err, debate.ErrQuorumFailedR1) {
+		t.Errorf("err matches ErrQuorumFailedR1 — sentinels must be disjoint")
+	}
+	if v.Status != "rate_limit_quorum_failed" {
+		t.Errorf("status = %q, want rate_limit_quorum_failed", v.Status)
+	}
+	if len(v.RateLimits) != 3 {
+		t.Fatalf("len(RateLimits) = %d, want 3", len(v.RateLimits))
+	}
+	for _, e := range v.RateLimits {
+		if e.Executor != "claude-code" {
+			t.Errorf("entry executor = %q, want claude-code", e.Executor)
+		}
+		if e.HelpCmd != "claude /usage" {
+			t.Errorf("entry help_cmd = %q, want claude /usage", e.HelpCmd)
+		}
+		if e.Round != 1 {
+			t.Errorf("entry round = %d, want 1", e.Round)
+		}
+	}
+	body := readVerdict(t, s)
+	if !strings.Contains(body, `"rate_limits"`) {
+		t.Errorf("verdict.json missing rate_limits[]: %s", body)
+	}
+	if !strings.Contains(body, `"status": "rate_limit_quorum_failed"`) {
+		t.Errorf("verdict.json missing rate_limit_quorum_failed status: %s", body)
+	}
+}
+
+// TestRun_RateLimitsAbsorbedByQuorum covers the happy-but-slightly-degraded
+// case: one expert hits a rate limit but quorum=1 still passes. The verdict
+// status stays "ok" while rate_limits[] carries the audit entry — proving
+// that omitempty is doing what we want and that the orchestrator collects
+// limit info even when the run succeeds.
+func TestRun_RateLimitsAbsorbedByQuorum(t *testing.T) {
+	stub := &stubExec{
+		name: "stub",
+		on: func(ctx context.Context, n int64, req executor.Request) (executor.Response, error) {
+			stage, label := classifyRequest(req)
+			if stage == stageR1 && label == "B" {
+				_ = os.WriteFile(req.StderrFile, []byte("limited\n"), 0o644)
+				return executor.Response{ExitCode: 1}, &runner.LimitError{
+					Tool:    "codex",
+					Pattern: "you've hit your usage limit",
+					HelpCmd: "codex /status",
+				}
+			}
+			if stage == stageBallot {
+				return writeOK("VOTE: A\n")(ctx, n, req)
+			}
+			return writeOK("body-"+label)(ctx, n, req)
+		},
+	}
+	register(t, stub)
+
+	p := newV2TestProfile("stub", []string{"e1", "e2", "e3"})
+	p.Quorum = 1
+	s := newV2Session(t, p, "q")
+
+	v, err := Run(context.Background(), p, "q", s)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if v.Status != "ok" {
+		t.Errorf("status = %q, want ok (quorum met despite rate-limit)", v.Status)
+	}
+	if len(v.RateLimits) == 0 {
+		t.Fatalf("RateLimits empty; want at least 1 entry for B")
+	}
+	var sawCodex bool
+	for _, e := range v.RateLimits {
+		if e.Executor == "codex" && e.Expert == "B" {
+			sawCodex = true
+		}
+	}
+	if !sawCodex {
+		t.Errorf("RateLimits missing codex/B entry: %+v", v.RateLimits)
 	}
 }
 

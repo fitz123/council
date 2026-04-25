@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fitz123/council/pkg/executor"
+	"github.com/fitz123/council/pkg/runner"
 	"github.com/fitz123/council/pkg/session"
 )
 
@@ -29,6 +30,13 @@ type stubExec struct {
 }
 
 func (s *stubExec) Name() string { return s.name }
+
+// BinaryName returns "sh" so cmd/council.Preflight resolves it via
+// exec.LookPath without needing a real claude/codex/gemini binary on
+// the test host. The real value of BinaryName per executor is asserted
+// in pkg/executor/{claudecode,codex,gemini}_test.go; here we just need
+// a name LookPath can find.
+func (s *stubExec) BinaryName() string { return "sh" }
 func (s *stubExec) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	atomic.AddInt64(&s.calls, 1)
 	p := filepath.ToSlash(req.StdoutFile)
@@ -342,6 +350,58 @@ func TestRun_QuorumFailedR1(t *testing.T) {
 	}
 }
 
+// TestRun_RateLimitQuorumFail — every expert returns *runner.LimitError;
+// debate.ErrRateLimitQuorumFail surfaces, cmd/council exits 6 with a
+// per-CLI help footer printed to stderr (one line per unique executor in
+// the verdict's rate_limits[]). Verifies ADR-0013 wiring end-to-end at the
+// exit-code boundary.
+func TestRun_RateLimitQuorumFail(t *testing.T) {
+	t.Chdir(withCouncilDir(t, t.TempDir()))
+	stub := &stubExec{
+		name: "claude-code",
+		onRound: func(_ int, label, _, stderrFile string) (int, error) {
+			_ = os.WriteFile(stderrFile, []byte("rate limited\n"), 0o644)
+			return 1, &runner.LimitError{
+				Tool:    "claude-code",
+				Pattern: "anthropic rate limit",
+				HelpCmd: "claude /usage",
+			}
+		},
+		onBallot: func(_, _, _ string) (int, error) {
+			return 0, errors.New("ballot should not run when R1 quorum fails")
+		},
+	}
+	registerStub(t, stub)
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"q"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitRateLimitQuorumFail {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitRateLimitQuorumFail, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "rate limits") {
+		t.Errorf("stderr missing rate-limit hint: %q", stderr.String())
+	}
+	// Footer: one line per UNIQUE executor — all three experts share the
+	// same Tool="claude-code" so the helpcmd appears exactly once.
+	if got := strings.Count(stderr.String(), "claude /usage"); got != 1 {
+		t.Errorf("claude /usage footer count = %d, want 1; stderr=%s", got, stderr.String())
+	}
+	verdicts, _ := filepath.Glob(".council/sessions/*/verdict.json")
+	if len(verdicts) != 1 {
+		t.Fatalf("verdict.json count = %d", len(verdicts))
+	}
+	b, _ := os.ReadFile(verdicts[0])
+	if !strings.Contains(string(b), `"status": "rate_limit_quorum_failed"`) {
+		t.Errorf("verdict.json missing rate_limit_quorum_failed status: %s", b)
+	}
+	if !strings.Contains(string(b), `"rate_limits"`) {
+		t.Errorf("verdict.json missing rate_limits[]: %s", b)
+	}
+	if !strings.Contains(string(b), `"executor": "claude-code"`) {
+		t.Errorf("verdict.json rate_limits[] missing executor=claude-code: %s", b)
+	}
+}
+
 // TestRun_InjectionInQuestion — operator question contains a fence-shaped
 // line. Exit 1 (config-like), status=injection_suspected_in_question.
 func TestRun_InjectionInQuestion(t *testing.T) {
@@ -413,7 +473,8 @@ type interruptibleStub struct {
 	started chan struct{}
 }
 
-func (s *interruptibleStub) Name() string { return s.name }
+func (s *interruptibleStub) Name() string       { return s.name }
+func (s *interruptibleStub) BinaryName() string { return "sh" }
 func (s *interruptibleStub) Execute(ctx context.Context, req executor.Request) (executor.Response, error) {
 	select {
 	case s.started <- struct{}{}:

@@ -83,6 +83,12 @@ type Mock struct{}
 // profiles do not need editing for smoke runs.
 func (*Mock) Name() string { return "claude-code" }
 
+// BinaryName matches ClaudeCode.BinaryName so smoke tests built with
+// -tags testbinary keep `exec.LookPath` returning a real `claude` binary
+// when one is on PATH — the preflight contract is binary-name based, not
+// registry-key based.
+func (*Mock) BinaryName() string { return "claude" }
+
 // Execute reads COUNCIL_MOCK_EXECUTOR and dispatches. An unknown value
 // is a programmer error in the smoke test setup, not user input, so we
 // return an error rather than silently defaulting.
