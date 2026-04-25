@@ -178,13 +178,14 @@ func TestRunBallot_MultipleVoteLinesDiscarded(t *testing.T) {
 }
 
 func TestRunBallot_WhitespaceVoteDiscarded(t *testing.T) {
-	// The parser at vote.go:28 is line-anchored ((?m)^VOTE: ([A-Z])\r?$),
-	// so any horizontal whitespace before VOTE: or after the letter prevents
-	// a match and the ballot is discarded. The ballot prompt explicitly
-	// instructs voters to write the VOTE line flush-left with no trailing
-	// whitespace; this test pins the contract so a future prompt edit that
-	// reintroduces an indented example would be caught here, not in
-	// production where every voter losing its ballot collapses quorum.
+	// voteLineRE / parseBallotVote are line-anchored: only a flush-left
+	// `VOTE: X` line with no horizontal whitespace before VOTE: or after
+	// the letter matches, so any whitespace variant is discarded. The
+	// ballot prompt explicitly instructs voters to write the VOTE line
+	// flush-left with no trailing whitespace; this test pins the contract
+	// so a future prompt edit that reintroduces an indented example would
+	// be caught here, not in production where every voter losing its
+	// ballot collapses quorum.
 	exec := &testExec{
 		name: testExecName,
 		fn: func(ctx context.Context, req executor.Request, _ int) (string, error) {

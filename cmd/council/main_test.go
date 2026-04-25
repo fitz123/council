@@ -280,7 +280,7 @@ func TestRun_Verbose(t *testing.T) {
 		"session folder:",
 		// logArtifacts: per-expert round-output blocks render with their
 		// header AND body content (happyStub writes "body-<label>" to
-		// each round-output.md).
+		// each output.md).
 		"=== round 1 expert ",
 		"=== round 2 expert ",
 		"body-",
@@ -557,6 +557,11 @@ func TestStripControlBytes(t *testing.T) {
 		{"bel replaced", "bell\x07after", "bell�after"},
 		{"null replaced", "null\x00byte", "null�byte"},
 		{"del replaced", "del\x7fbyte", "del�byte"},
+		// 8-bit C1 controls — 0x9B is CSI (Control Sequence Introducer) on
+		// 8-bit-clean terminals; without scrubbing, an artifact could inject
+		// ANSI-like sequences without ever emitting an ESC byte.
+		{"c1 csi replaced", "csi[2Jhere", "csi�[2Jhere"},
+		{"c1 padding replaced", "padbyte", "pad�byte"},
 		{"unicode preserved", "café — 日本語", "café — 日本語"},
 	}
 	for _, c := range cases {

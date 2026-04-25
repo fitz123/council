@@ -521,11 +521,19 @@ func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 			realName[e.Label] = e.RealName
 		}
 		for _, b := range v.Voting.Ballots {
+			fmt.Fprintf(w, "\n=== ballot %s (%s) ===\n", b.VoterLabel, realName[b.VoterLabel])
 			path := filepath.Join(sess.Path, "voting", "votes", b.VoterLabel+".txt")
 			body, err := os.ReadFile(path)
-			fmt.Fprintf(w, "\n=== ballot %s (%s) ===\n", b.VoterLabel, realName[b.VoterLabel])
-			if err == nil {
+			switch {
+			case err == nil:
 				fmt.Fprintln(w, stripControlBytes(strings.TrimRight(string(body), "\n")))
+			case b.VotedFor != "":
+				// File missing/unreadable but the verdict has a vote
+				// recorded — fall back to the structured outcome so the
+				// operator can always see "who voted for whom" even if
+				// the on-disk artifact was wiped between the run and
+				// this dump.
+				fmt.Fprintf(w, "VOTE: %s\n", b.VotedFor)
 			}
 			if b.VotedFor == "" {
 				fmt.Fprintln(w, "(no vote — discarded)")
@@ -534,22 +542,26 @@ func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 	}
 }
 
-// stripControlBytes scrubs LLM-controlled artifact bodies of C0 control
-// characters (U+0000..U+001F) and DEL (U+007F) before they are written to
-// the operator's verbose stderr stream. Tab, newline, and carriage return
-// are preserved so multi-line and tabbed content renders normally; every
-// other control byte (ESC for ANSI/OSC, BEL, etc.) becomes U+FFFD so a
+// stripControlBytes scrubs LLM-controlled artifact bodies of terminal-
+// interpreting control characters before they are written to the operator's
+// verbose stderr stream. Tab, newline, and carriage return are preserved so
+// multi-line and tabbed content renders normally; every other byte in the
+// C0 range (U+0000..U+001F), DEL (U+007F), and the C1 range (U+0080..U+009F,
+// which includes 0x9B = CSI on 8-bit-clean terminals) becomes U+FFFD so a
 // malformed or malicious peer output cannot clear the screen, rewrite
 // terminal state, or spoof subsequent council log lines.
 func stripControlBytes(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if r == '\t' || r == '\n' || r == '\r' || (r >= 0x20 && r != 0x7f) {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r':
 			b.WriteRune(r)
-			continue
+		case r < 0x20, r == 0x7f, r >= 0x80 && r <= 0x9f:
+			b.WriteRune('�')
+		default:
+			b.WriteRune(r)
 		}
-		b.WriteRune('�')
 	}
 	return b.String()
 }
