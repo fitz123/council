@@ -71,10 +71,12 @@ func main() {
 // returns ErrInterrupted is what lets us exit 130 immediately without a
 // second flush step here.
 func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	// Subcommand dispatch: `council resume [--session <id>]` continues an
-	// already-materialised session. Detected before flag parsing so the
-	// resume flag set can carry its own --session option without
-	// colliding with the main flag set's -p / -v / --version.
+	// Subcommand dispatch. Detected before flag parsing so each
+	// subcommand's flag set can carry its own options without colliding
+	// with the main flag set's -p / -v / --version.
+	if len(argv) > 0 && argv[0] == initSubcommand {
+		return runInit(argv[1:], stdout, stderr)
+	}
 	if len(argv) > 0 && argv[0] == resumeSubcommand {
 		return runResume(ctx, argv[1:], stdout, stderr)
 	}
@@ -408,6 +410,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   council [flags] "question"
   council [flags] -          # read question from stdin (until EOF)
+  council init [--force]
   council resume [--session ID]
   council --version
   council --help
@@ -418,6 +421,8 @@ Flags:
       --version        Print version and exit.
 
 Subcommands:
+  init                 Probe installed CLIs and write ~/.config/council/default.yaml
+                       with one expert per verified CLI. Idempotent without --force.
   resume               Continue the newest incomplete session, or the one named
                        by --session. Re-runs any stage missing its .done marker.
 

@@ -117,6 +117,41 @@ func TestLoadFile_Valid(t *testing.T) {
 	}
 }
 
+// TestLoadFile_SingleExpertAccepted — v3 relaxed the experts-floor from
+// >=2 to >=1 (loader.go:231) so `council init` can write a 1-expert
+// profile when only one CLI is authed on the host. The validator must
+// accept it; downstream debate degenerates to "trust the one survivor".
+func TestLoadFile_SingleExpertAccepted(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `version: 2
+name: default
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 180s
+quorum: 1
+max_retries: 0
+rounds: 2
+round_2_prompt_file: prompts/peer-aware.md
+voting:
+  ballot_prompt_file: prompts/ballot.md
+  timeout: 180s
+`
+	cfgPath := writeProfile(t, dir, yaml)
+	p, err := LoadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadFile(single expert) = %v, want nil", err)
+	}
+	if len(p.Experts) != 1 {
+		t.Errorf("Experts count = %d, want 1", len(p.Experts))
+	}
+	if p.Quorum != 1 {
+		t.Errorf("Quorum = %d, want 1", p.Quorum)
+	}
+}
+
 // TestLoadFile_VotingTimeoutOptional confirms that a profile may omit
 // voting.timeout — Profile.Voting.Timeout is then zero and downstream code
 // applies its own default. The plan only mandates ballot_prompt_file as
@@ -267,25 +302,7 @@ rounds: 2
 voting:
   ballot_prompt_file: prompts/ballot.md
 `,
-			wantSub: "experts",
-		},
-		{
-			name: "single expert (below floor)",
-			yaml: `version: 2
-name: default
-experts:
-  - name: expert_1
-    executor: claude-code
-    model: sonnet
-    prompt_file: prompts/independent.md
-    timeout: 180s
-quorum: 1
-max_retries: 0
-rounds: 2
-voting:
-  ballot_prompt_file: prompts/ballot.md
-`,
-			wantSub: "at least 2",
+			wantSub: "at least 1",
 		},
 		{
 			name: "missing expert name",
