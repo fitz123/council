@@ -3,6 +3,7 @@ package debate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/fitz123/council/pkg/executor"
 	"github.com/fitz123/council/pkg/prompt"
+	"github.com/fitz123/council/pkg/runner"
 	"github.com/fitz123/council/pkg/session"
 )
 
@@ -56,12 +58,18 @@ type BallotConfig struct {
 // (subprocess failed, forgery detected, malformed output, or the voted-for
 // label was outside the active cohort). Discarded ballots are NOT treated as
 // run failures (D8): the Tally step simply excludes them.
+//
+// LimitErr is non-nil when the ballot subprocess returned a *runner.LimitError
+// (ADR-0013). Ballots run with AllowedTools=nil so this is rare in practice,
+// but the field is captured anyway so the orchestrator can include the entry
+// in verdict.json's rate_limits[] alongside any round-level rate-limit hits.
 type Ballot struct {
 	VoterLabel      string
 	VotedFor        string
 	ExitCode        int
 	Retries         int
 	DurationSeconds float64
+	LimitErr        *runner.LimitError
 }
 
 // TallyResult is the outcome of aggregating ballots. Exactly one of Winner
@@ -175,6 +183,10 @@ func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, quest
 	result.Retries = retries
 	result.DurationSeconds = resp.Duration.Seconds()
 	if err != nil {
+		var le *runner.LimitError
+		if errors.As(err, &le) {
+			result.LimitErr = le
+		}
 		return result
 	}
 

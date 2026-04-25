@@ -59,6 +59,17 @@ var ErrQuorumFailedR1 = errors.New("debate: round 1 quorum not met")
 // cannot meet quorum.
 var ErrQuorumFailedR2 = errors.New("debate: round 2 quorum not met")
 
+// ErrRateLimitQuorumFail is returned by RunRound1 / RunRound2 when survivors
+// fall below quorum AND at least one of the failures was a *runner.LimitError
+// (ADR-0013). This is intentionally distinct from ErrQuorumFailedR1 /
+// ErrQuorumFailedR2: cmd/council maps it to exit code 6 with a per-CLI help
+// footer, so errors.Is must NOT also match the round-specific sentinels.
+//
+// When quorum is met despite some experts hitting rate-limits, the round
+// returns nil (the LimitErrors are still recorded on RoundOutput.LimitErr
+// and surface in verdict.json's rate_limits[]).
+var ErrRateLimitQuorumFail = errors.New("debate: quorum not met due to rate-limit failures")
+
 // LabeledExpert pairs a profile role with its session-scoped anonymized
 // label. The orchestrator builds this slice after calling AssignLabels; the
 // round runners consume it directly so they never need the mapping itself.
@@ -86,6 +97,12 @@ type RoundConfig struct {
 // the raw subprocess stdout on success; on "failed" it is empty so the caller
 // cannot accidentally propagate leaked bytes into a downstream prompt. On
 // "carried" (R2 only) it holds the R1 body that was copied forward.
+//
+// LimitErr is non-nil when the expert subprocess failed because it returned
+// a *runner.LimitError (ADR-0013); the orchestrator collects these into
+// verdict.json's rate_limits[] and decides exit code 6 vs the regular
+// quorum-fail path. LimitErr is independent of Participation: a rate-limited
+// R2 expert with R1 success is still "carried" with LimitErr populated.
 type RoundOutput struct {
 	Label           string
 	Name            string
@@ -94,6 +111,7 @@ type RoundOutput struct {
 	ExitCode        int
 	Retries         int
 	DurationSeconds float64
+	LimitErr        *runner.LimitError
 }
 
 // RunRound1 fans experts out in blind parallel: no expert sees any other's
@@ -134,9 +152,32 @@ func RunRound1(ctx context.Context, cfg RoundConfig, question string) ([]RoundOu
 		}
 	}
 	if survivors < cfg.Quorum {
+		// Rate-limit quorum-fail wins over the generic round-1 sentinel
+		// when ANY failed expert returned a *runner.LimitError. The two
+		// sentinels are intentionally disjoint (errors.Is matches one and
+		// not the other) so cmd/council can map this case to exit 6 with
+		// a per-CLI help footer instead of the standard exit 2.
+		if hasLimitErr(outputs) {
+			return outputs, fmt.Errorf("%w: %d survivors < quorum %d", ErrRateLimitQuorumFail, survivors, cfg.Quorum)
+		}
 		return outputs, fmt.Errorf("%w: %d survivors < quorum %d", ErrQuorumFailedR1, survivors, cfg.Quorum)
 	}
 	return outputs, nil
+}
+
+// hasLimitErr reports whether any RoundOutput in outputs was attributed to a
+// rate-limit failure. Used by RunRound1 / RunRound2 to choose between the
+// generic quorum-fail sentinel and ErrRateLimitQuorumFail when survivors fall
+// below cfg.Quorum. A single rate-limited failure flips the round to the
+// rate-limit sentinel — the orchestrator can still record the non-rate-limit
+// failures in verdict.json (those have LimitErr=nil).
+func hasLimitErr(outputs []RoundOutput) bool {
+	for _, o := range outputs {
+		if o.LimitErr != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // runExpertR1 executes one expert's R1 lifecycle: mkdir stage dir, build +
@@ -195,6 +236,10 @@ func runExpertR1(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 	result.DurationSeconds = resp.Duration.Seconds()
 
 	if err != nil {
+		var le *runner.LimitError
+		if errors.As(err, &le) {
+			result.LimitErr = le
+		}
 		// Retry budget spent: per D3 the drop is permanent, so record a
 		// .failed tombstone. Skip on ctx cancellation — SIGINT mid-retry
 		// is "come back later," not a definitive failure.
@@ -309,6 +354,12 @@ func RunRound2(ctx context.Context, cfg RoundConfig, question string, r1 []Round
 		}
 	}
 	if survivors < cfg.Quorum {
+		// Same disjoint-sentinel logic as R1: a rate-limited failure
+		// flips the round to ErrRateLimitQuorumFail so cmd/council
+		// reaches exit 6 instead of the generic exit-2 path.
+		if hasLimitErr(outputs) {
+			return outputs, fmt.Errorf("%w: %d survivors < quorum %d", ErrRateLimitQuorumFail, survivors, cfg.Quorum)
+		}
 		return outputs, fmt.Errorf("%w: %d survivors < quorum %d", ErrQuorumFailedR2, survivors, cfg.Quorum)
 	}
 	return outputs, nil
@@ -378,6 +429,13 @@ func runExpertR2(ctx context.Context, cfg RoundConfig, ex LabeledExpert, questio
 	result.ExitCode = resp.ExitCode
 	result.Retries = retries
 	result.DurationSeconds = resp.Duration.Seconds()
+
+	if err != nil {
+		var le *runner.LimitError
+		if errors.As(err, &le) {
+			result.LimitErr = le
+		}
+	}
 
 	forged := false
 	if err == nil {

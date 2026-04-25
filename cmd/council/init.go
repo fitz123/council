@@ -277,14 +277,14 @@ func writePromptSeeds(configDir string) error {
 // in declaration order) and avoids leaking marshal concerns into the
 // loader package.
 type initYAML struct {
-	Version          int             `yaml:"version"`
-	Name             string          `yaml:"name"`
-	Experts          []initYAMLRole  `yaml:"experts"`
-	Quorum           int             `yaml:"quorum"`
-	MaxRetries       int             `yaml:"max_retries"`
-	Rounds           int             `yaml:"rounds"`
-	Round2PromptFile string          `yaml:"round_2_prompt_file"`
-	Voting           initYAMLVoting  `yaml:"voting"`
+	Version          int            `yaml:"version"`
+	Name             string         `yaml:"name"`
+	Experts          []initYAMLRole `yaml:"experts"`
+	Quorum           int            `yaml:"quorum"`
+	MaxRetries       int            `yaml:"max_retries"`
+	Rounds           int            `yaml:"rounds"`
+	Round2PromptFile string         `yaml:"round_2_prompt_file"`
+	Voting           initYAMLVoting `yaml:"voting"`
 }
 
 type initYAMLRole struct {

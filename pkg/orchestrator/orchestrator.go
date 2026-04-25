@@ -134,10 +134,20 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 	// Stage 3: round 1 (blind fan-out).
 	r1, err := debate.RunRound1(ctx, rcfg, question)
 	v.Rounds = append(v.Rounds, buildRoundVerdict(r1, profile))
+	v.RateLimits = append(v.RateLimits, collectRoundLimits(r1, 1)...)
 	if ctx.Err() != nil {
 		return finalizeInterrupted(v, sess, startedAt)
 	}
 	if err != nil {
+		// ErrRateLimitQuorumFail is checked BEFORE the generic R1
+		// sentinel: the two are disjoint (debate exposes them as distinct
+		// errors so cmd/council can map only the rate-limit case to exit
+		// 6), but ordering the rate-limit branch first keeps the intent
+		// readable.
+		if errors.Is(err, debate.ErrRateLimitQuorumFail) {
+			v.Status = "rate_limit_quorum_failed"
+			return finalizeAndWrite(v, sess, startedAt, err)
+		}
 		if errors.Is(err, debate.ErrQuorumFailedR1) {
 			v.Status = "quorum_failed_round_1"
 			return finalizeAndWrite(v, sess, startedAt, err)
@@ -149,10 +159,15 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 	// Stage 4: round 2 (peer-aware, with carry-forward on per-expert fail).
 	r2, err := debate.RunRound2(ctx, rcfg, question, r1)
 	v.Rounds = append(v.Rounds, buildRoundVerdict(r2, profile))
+	v.RateLimits = append(v.RateLimits, collectRoundLimits(r2, 2)...)
 	if ctx.Err() != nil {
 		return finalizeInterrupted(v, sess, startedAt)
 	}
 	if err != nil {
+		if errors.Is(err, debate.ErrRateLimitQuorumFail) {
+			v.Status = "rate_limit_quorum_failed"
+			return finalizeAndWrite(v, sess, startedAt, err)
+		}
 		if errors.Is(err, debate.ErrQuorumFailedR2) {
 			v.Status = "quorum_failed_round_2"
 			return finalizeAndWrite(v, sess, startedAt, err)
@@ -179,6 +194,7 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 		MaxRetries: profile.MaxRetries,
 	}
 	ballots, err := debate.RunBallot(ctx, bcfg, question, string(aggregateMD))
+	v.RateLimits = append(v.RateLimits, collectBallotLimits(ballots)...)
 	if ctx.Err() != nil {
 		return finalizeInterrupted(v, sess, startedAt)
 	}
@@ -434,4 +450,53 @@ func activeCohort(r2 []debate.RoundOutput, labeled []debate.LabeledExpert) ([]de
 
 func verdictSessionPath(id string) string {
 	return "./" + filepath.ToSlash(filepath.Join(".council", "sessions", id))
+}
+
+// collectRoundLimits walks a slice of debate.RoundOutput and returns one
+// session.RateLimitEntry per output whose LimitErr is non-nil. Round is the
+// 1-based round number stamped on each entry so verdict.json can carry an
+// audit trail across R1, R2, and the ballot stage. The slice is ordered by
+// expert label (matching the input slice's existing alphabetical order from
+// debate.RunRound1 / RunRound2) so verdict bytes stay stable across runs.
+func collectRoundLimits(outputs []debate.RoundOutput, round int) []session.RateLimitEntry {
+	out := make([]session.RateLimitEntry, 0)
+	for _, o := range outputs {
+		if o.LimitErr == nil {
+			continue
+		}
+		out = append(out, session.RateLimitEntry{
+			Executor: o.LimitErr.Tool,
+			Pattern:  o.LimitErr.Pattern,
+			HelpCmd:  o.LimitErr.HelpCmd,
+			Round:    round,
+			Expert:   o.Label,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// collectBallotLimits is the ballot-stage analogue of collectRoundLimits.
+// Round 0 is reserved for the ballot stage so verdict.json readers can
+// distinguish ballots from R1/R2 expert spawns when scanning rate_limits[].
+func collectBallotLimits(ballots []debate.Ballot) []session.RateLimitEntry {
+	out := make([]session.RateLimitEntry, 0)
+	for _, b := range ballots {
+		if b.LimitErr == nil {
+			continue
+		}
+		out = append(out, session.RateLimitEntry{
+			Executor: b.LimitErr.Tool,
+			Pattern:  b.LimitErr.Pattern,
+			HelpCmd:  b.LimitErr.HelpCmd,
+			Round:    0,
+			Expert:   b.VoterLabel,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

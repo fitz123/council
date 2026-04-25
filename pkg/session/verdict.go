@@ -25,9 +25,23 @@ type Verdict struct {
 	Rounds          []Round           `json:"rounds"`
 	Experts         []ExpertSummary   `json:"experts"`
 	Voting          *VerdictVoting    `json:"voting,omitempty"`
+	RateLimits      []RateLimitEntry  `json:"rate_limits,omitempty"`
 	StartedAt       string            `json:"started_at"`
 	EndedAt         string            `json:"ended_at"`
 	DurationSeconds float64           `json:"duration_seconds"`
+}
+
+// RateLimitEntry records one expert subprocess that returned a runner-level
+// rate-limit error (ADR-0013). The orchestrator populates the slice from the
+// LimitErr fields on round outputs and ballots so verdict.json carries a
+// per-vendor audit of which CLI hit which marker. omitempty on the slice
+// keeps happy-path verdicts byte-identical to the pre-v3 shape.
+type RateLimitEntry struct {
+	Executor string `json:"executor"`
+	Pattern  string `json:"pattern"`
+	HelpCmd  string `json:"help_cmd"`
+	Round    int    `json:"round"`
+	Expert   string `json:"expert"`
 }
 
 // Round captures one debate round's per-expert outcomes. v2 emits one Round

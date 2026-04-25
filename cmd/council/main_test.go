@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fitz123/council/pkg/executor"
+	"github.com/fitz123/council/pkg/runner"
 	"github.com/fitz123/council/pkg/session"
 )
 
@@ -346,6 +347,58 @@ func TestRun_QuorumFailedR1(t *testing.T) {
 	b, _ := os.ReadFile(verdicts[0])
 	if !strings.Contains(string(b), `"status": "quorum_failed_round_1"`) {
 		t.Errorf("verdict.json missing quorum_failed_round_1: %s", b)
+	}
+}
+
+// TestRun_RateLimitQuorumFail — every expert returns *runner.LimitError;
+// debate.ErrRateLimitQuorumFail surfaces, cmd/council exits 6 with a
+// per-CLI help footer printed to stderr (one line per unique executor in
+// the verdict's rate_limits[]). Verifies ADR-0013 wiring end-to-end at the
+// exit-code boundary.
+func TestRun_RateLimitQuorumFail(t *testing.T) {
+	t.Chdir(withCouncilDir(t, t.TempDir()))
+	stub := &stubExec{
+		name: "claude-code",
+		onRound: func(_ int, label, _, stderrFile string) (int, error) {
+			_ = os.WriteFile(stderrFile, []byte("rate limited\n"), 0o644)
+			return 1, &runner.LimitError{
+				Tool:    "claude-code",
+				Pattern: "anthropic rate limit",
+				HelpCmd: "claude /usage",
+			}
+		},
+		onBallot: func(_, _, _ string) (int, error) {
+			return 0, errors.New("ballot should not run when R1 quorum fails")
+		},
+	}
+	registerStub(t, stub)
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"q"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitRateLimitQuorumFail {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitRateLimitQuorumFail, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "rate limits") {
+		t.Errorf("stderr missing rate-limit hint: %q", stderr.String())
+	}
+	// Footer: one line per UNIQUE executor — all three experts share the
+	// same Tool="claude-code" so the helpcmd appears exactly once.
+	if got := strings.Count(stderr.String(), "claude /usage"); got != 1 {
+		t.Errorf("claude /usage footer count = %d, want 1; stderr=%s", got, stderr.String())
+	}
+	verdicts, _ := filepath.Glob(".council/sessions/*/verdict.json")
+	if len(verdicts) != 1 {
+		t.Fatalf("verdict.json count = %d", len(verdicts))
+	}
+	b, _ := os.ReadFile(verdicts[0])
+	if !strings.Contains(string(b), `"status": "rate_limit_quorum_failed"`) {
+		t.Errorf("verdict.json missing rate_limit_quorum_failed status: %s", b)
+	}
+	if !strings.Contains(string(b), `"rate_limits"`) {
+		t.Errorf("verdict.json missing rate_limits[]: %s", b)
+	}
+	if !strings.Contains(string(b), `"executor": "claude-code"`) {
+		t.Errorf("verdict.json rate_limits[] missing executor=claude-code: %s", b)
 	}
 }
 

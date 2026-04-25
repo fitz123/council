@@ -406,8 +406,8 @@ func TestRunRound1_GrantsWebTools(t *testing.T) {
 	// package-level constants in pkg/debate so a future profile field
 	// cannot accidentally downgrade the tools.
 	var (
-		mu      sync.Mutex
-		seen    = map[string]executor.Request{}
+		mu   sync.Mutex
+		seen = map[string]executor.Request{}
 	)
 	exec := &testExec{
 		name: testExecName,
