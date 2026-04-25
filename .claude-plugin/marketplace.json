@@ -1,0 +1,17 @@
+{
+  "name": "council",
+  "owner": {
+    "name": "fitz123"
+  },
+  "plugins": [
+    {
+      "name": "council",
+      "source": "./",
+      "description": "Multi-expert CLI committee — fan a question to N expert CLIs, run a two-round debate, then vote on the answer",
+      "version": "0.1.0",
+      "author": {
+        "name": "fitz123"
+      }
+    }
+  ]
+}

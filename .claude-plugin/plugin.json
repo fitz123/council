@@ -1,0 +1,20 @@
+{
+  "name": "council",
+  "version": "0.1.0",
+  "description": "Multi-expert CLI committee — fan a question to N expert CLIs, run a two-round debate, then vote on the answer",
+  "author": {
+    "name": "fitz123"
+  },
+  "homepage": "https://github.com/fitz123/council",
+  "repository": "https://github.com/fitz123/council",
+  "license": "MIT",
+  "keywords": [
+    "multi-agent",
+    "debate",
+    "voting",
+    "claude-code",
+    "codex",
+    "gemini"
+  ],
+  "skills": "./assets/claude/skills/"
+}
