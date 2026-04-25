@@ -6,28 +6,18 @@
 //   - stdin piping of the prompt body,
 //   - stdout/stderr capture into caller-named files,
 //   - timeout enforcement (SIGTERM, 2s grace, SIGKILL),
-//   - rate-limit (429) detection from the captured stderr,
-//   - retry policy.
+//   - fail-retry policy (timeout, non-zero exit) bounded by req.MaxRetries.
 //
-// Retry-ownership split (load-bearing — see docs/design/v1.md §10):
+// Per ADR-0013 (no runner-side rate-limit retries), rate-limit detection
+// has moved out of this package. Executors call DetectLimit themselves
+// against their own per-vendor marker list and wrap the runner error into
+// *LimitError so the orchestrator (pkg/debate) can classify it via
+// errors.As. The runner no longer reads stderr for any classification
+// purpose; it just reports the exit code and surfaces ErrNonZeroExit.
 //
-//   - Rate-limit retries are RUNNER-OWNED. They are an infrastructure
-//     concern: every CLI we wrap inherits the same back-off behavior, and
-//     a 429 should not consume the caller's policy budget. Bound: up to
-//     req.RateLimitMaxRetries rate-limit retries (the design's
-//     "max_retries+1" wording is materialised at the call site by passing
-//     profile.MaxRetries+1 here — see pkg/executor/claudecode).
-//   - Fail-retries (timeout, non-zero exit without a rate-limit marker)
-//     are ORCHESTRATOR-OWNED. They are a policy concern driven by the
-//     profile's max_retries field. Callers that want to keep all
-//     fail-retry decisions at the orchestrator layer pass MaxRetries: 0
-//     to disable runner-side fail-retry; the orchestrator then re-invokes
-//     Run once per fail-retry it wants to grant.
-//
-// pkg/executor/claudecode follows the second convention: it passes
-// MaxRetries: 0 so pkg/orchestrator stays in charge of fail-retry policy,
-// and sets RateLimitMaxRetries: profile.MaxRetries+1 so the rate-limit
-// budget tracks the profile.
+// Fail-retries (timeout, non-zero exit) remain runner-owned via MaxRetries.
+// pkg/executor/claudecode passes MaxRetries: 0 so pkg/debate stays in
+// charge of fail-retry policy.
 package runner
 
 import (
@@ -49,26 +39,22 @@ import (
 // things like CLAUDE_CODE_MAX_OUTPUT_TOKENS without reaching into runner
 // internals. nil Env means inherit the parent process environment.
 //
-// MaxRetries is the per-call fail-retry budget (timeout, non-zero exit
-// without a rate-limit marker). RateLimitMaxRetries is the per-call
-// rate-limit retry budget (429s); see the package doc for the
-// runner-owned vs orchestrator-owned split.
+// MaxRetries is the per-call fail-retry budget (timeout, non-zero exit).
+// Rate-limit detection and any related back-off happens at the executor
+// layer (ADR-0013), not here.
 type RunRequest struct {
-	Argv                []string
-	Prompt              string
-	Env                 []string
-	StdoutFile          string
-	StderrFile          string
-	Timeout             time.Duration
-	MaxRetries          int
-	RateLimitMaxRetries int
+	Argv       []string
+	Prompt     string
+	Env        []string
+	StdoutFile string
+	StderrFile string
+	Timeout    time.Duration
+	MaxRetries int
 }
 
 // RunResponse summarizes the final attempt. Retries counts every retry
-// across both rate-limit and fail-retry paths, so the orchestrator can
-// record a single number into verdict.json regardless of which kind of
-// retry happened. RateLimited is sticky: it is true if any attempt
-// observed a 429 marker, even if the final attempt did not.
+// across the fail-retry path so the orchestrator can record a single
+// number into verdict.json.
 //
 // ExitCode carries the final attempt's exit code, with one sentinel:
 // KilledExitCode (-1) means the subprocess was killed before it could
@@ -76,10 +62,9 @@ type RunRequest struct {
 // verdict.json can surface -1 directly so readers can distinguish
 // "exited cleanly with code 0" from "never got to exit".
 type RunResponse struct {
-	ExitCode    int
-	Duration    time.Duration
-	Retries     int
-	RateLimited bool
+	ExitCode int
+	Duration time.Duration
+	Retries  int
 }
 
 // KilledExitCode is the ExitCode sentinel returned when a subprocess was
@@ -94,7 +79,6 @@ const KilledExitCode = -1
 var (
 	ErrTimeout     = errors.New("runner: subprocess timed out")
 	ErrNonZeroExit = errors.New("runner: subprocess exited non-zero")
-	ErrRateLimit   = errors.New("runner: rate-limited (429) by upstream")
 )
 
 // Run executes req per the policy in the package doc. It blocks until
@@ -104,14 +88,14 @@ var (
 // without a second bookkeeping path.
 //
 // ctx cancellation is honored both during the active subprocess (the
-// process group is killed) and during inter-attempt rate-limit sleep.
-// Cancellation returns ctx.Err() (not ErrTimeout) so callers can tell
-// "caller asked us to stop" apart from "we hit our own deadline".
+// process group is killed) and during inter-attempt sleep. Cancellation
+// returns ctx.Err() (not ErrTimeout) so callers can tell "caller asked
+// us to stop" apart from "we hit our own deadline".
 func Run(ctx context.Context, req RunRequest) (RunResponse, error) {
 	var resp RunResponse
-	var failRetries, rlRetries int
+	var failRetries int
 	for {
-		exitCode, retryAfter, dur, err := runOnce(ctx, req)
+		exitCode, dur, err := runOnce(ctx, req)
 		resp.Duration += dur
 		resp.ExitCode = exitCode
 		if err == nil {
@@ -121,31 +105,10 @@ func Run(ctx context.Context, req RunRequest) (RunResponse, error) {
 			}
 			return resp, nil
 		}
-		if errors.Is(err, ErrRateLimit) {
-			resp.RateLimited = true
-			if rlRetries >= req.RateLimitMaxRetries {
-				return resp, err
-			}
-			rlRetries++
-			resp.Retries++
-			wait := retryAfter
-			if wait <= 0 {
-				wait = 10 * time.Second
-			}
-			t := time.NewTimer(wait)
-			select {
-			case <-t.C:
-			case <-ctx.Done():
-				t.Stop()
-				return resp, ctx.Err()
-			}
-			continue
-		}
-		// ErrTimeout or ErrNonZeroExit (no rate-limit marker) — or a
-		// parent-ctx cancellation that surfaced as killReason above.
-		// Context cancellation must not consume retry budget: retrying a
-		// cancelled ctx just respawns a subprocess that will be killed
-		// again.
+		// ErrTimeout or ErrNonZeroExit — or a parent-ctx cancellation that
+		// surfaced as killReason above. Context cancellation must not
+		// consume retry budget: retrying a cancelled ctx just respawns a
+		// subprocess that will be killed again.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return resp, err
 		}
@@ -159,27 +122,23 @@ func Run(ctx context.Context, req RunRequest) (RunResponse, error) {
 
 // runOnce performs one attempt and returns its raw outcome. The caller
 // (Run) is responsible for retry decisions.
-//
-// retryAfter is non-zero only when the attempt was classified as
-// rate-limited AND the stderr included a parseable Retry-After hint;
-// otherwise the caller falls back to a default sleep.
-func runOnce(parent context.Context, req RunRequest) (exitCode int, retryAfter time.Duration, dur time.Duration, err error) {
+func runOnce(parent context.Context, req RunRequest) (exitCode int, dur time.Duration, err error) {
 	if len(req.Argv) == 0 {
-		return 0, 0, 0, fmt.Errorf("runner: empty Argv")
+		return 0, 0, fmt.Errorf("runner: empty Argv")
 	}
 	if req.StdoutFile == "" {
-		return 0, 0, 0, fmt.Errorf("runner: StdoutFile is required")
+		return 0, 0, fmt.Errorf("runner: StdoutFile is required")
 	}
 	if req.StderrFile == "" {
-		return 0, 0, 0, fmt.Errorf("runner: StderrFile is required")
+		return 0, 0, fmt.Errorf("runner: StderrFile is required")
 	}
 	if req.Timeout <= 0 {
-		return 0, 0, 0, fmt.Errorf("runner: Timeout must be > 0, got %s", req.Timeout)
+		return 0, 0, fmt.Errorf("runner: Timeout must be > 0, got %s", req.Timeout)
 	}
 
 	stdout, openErr := os.Create(req.StdoutFile)
 	if openErr != nil {
-		return 0, 0, 0, fmt.Errorf("runner: open stdout %s: %w", req.StdoutFile, openErr)
+		return 0, 0, fmt.Errorf("runner: open stdout %s: %w", req.StdoutFile, openErr)
 	}
 	defer stdout.Close()
 
@@ -190,7 +149,7 @@ func runOnce(parent context.Context, req RunRequest) (exitCode int, retryAfter t
 		// offline readers looking for a session's artifacts).
 		_ = stdout.Close()
 		_ = os.Remove(req.StdoutFile)
-		return 0, 0, 0, fmt.Errorf("runner: open stderr %s: %w", req.StderrFile, openErr)
+		return 0, 0, fmt.Errorf("runner: open stderr %s: %w", req.StderrFile, openErr)
 	}
 	defer stderr.Close()
 
@@ -205,7 +164,7 @@ func runOnce(parent context.Context, req RunRequest) (exitCode int, retryAfter t
 
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
-		return 0, 0, time.Since(start), fmt.Errorf("runner: start: %w", err)
+		return 0, time.Since(start), fmt.Errorf("runner: start: %w", err)
 	}
 
 	// Watch process exit on a separate goroutine so we can multiplex
@@ -234,8 +193,8 @@ func runOnce(parent context.Context, req RunRequest) (exitCode int, retryAfter t
 	_ = waitErr // exit error after a forced kill is uninformative; killReason carries the signal
 	dur = time.Since(start)
 
-	// Flush captured output to disk before classification — the
-	// rate-limit scan reads the stderr file.
+	// Flush captured output to disk so executors that call DetectLimit
+	// after Run returns see a complete stderr file.
 	_ = stdout.Sync()
 	_ = stderr.Sync()
 
@@ -243,26 +202,22 @@ func runOnce(parent context.Context, req RunRequest) (exitCode int, retryAfter t
 		// KilledExitCode (-1) distinguishes "runner tore the subprocess
 		// down" from "subprocess exited cleanly with code 0" — readers
 		// of verdict.json need to see the difference.
-		return KilledExitCode, 0, dur, killReason
+		return KilledExitCode, dur, killReason
 	}
 
 	if waitErr == nil {
-		return 0, 0, dur, nil
+		return 0, dur, nil
 	}
 
-	// non-zero exit. Capture exit code, then probe stderr for 429.
 	if exitErr, ok := waitErr.(*exec.ExitError); ok {
 		exitCode = exitErr.ExitCode()
 	} else {
 		// non-ExitError wait failure (e.g. wait syscall error). Treat
 		// as a runtime error so callers can distinguish from "child
 		// ran and exited non-zero".
-		return 0, 0, dur, fmt.Errorf("runner: wait: %w", waitErr)
+		return 0, dur, fmt.Errorf("runner: wait: %w", waitErr)
 	}
-	if hint, ok := scanStderr(req.StderrFile); ok {
-		return exitCode, hint, dur, ErrRateLimit
-	}
-	return exitCode, 0, dur, fmt.Errorf("%w (exit %d)", ErrNonZeroExit, exitCode)
+	return exitCode, dur, fmt.Errorf("%w (exit %d)", ErrNonZeroExit, exitCode)
 }
 
 // killProcessGroup signals the spawned process's group with SIGTERM,

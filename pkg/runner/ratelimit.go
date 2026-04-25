@@ -1,56 +1,66 @@
 package runner
 
 import (
+	"fmt"
 	"os"
-	"regexp"
-	"strconv"
-	"time"
+	"strings"
 )
 
-// Markers we treat as a 429 / rate-limit signal in stderr. The bare
-// substring "429" was rejected during design (false matches on port
-// numbers, byte counts, exit-code echoes, etc.). The accepted forms:
+// LimitError is the typed wrapper executors return when DetectLimit
+// matches one of their per-vendor rate-limit markers in the captured
+// stderr. The orchestrator (pkg/debate) classifies expert failures via
+// errors.As(err, &limitErr); on quorum failure the per-CLI footer printed
+// by cmd/council/main.go reads HelpCmd directly.
 //
-//   - "rate_limit" or "rate limit", optionally followed by " exceeded"
-//   - "429" appearing AS A WORD next to a "too many" co-occurrence in
-//     either order
+// Pattern is the marker that matched (lowercased substring as supplied by
+// the executor). Tool is the executor's stable name (e.g. "claude-code",
+// "codex", "gemini-cli"). HelpCmd is a one-liner the user can run to
+// inspect their quota / billing.
+type LimitError struct {
+	Pattern string
+	Tool    string
+	HelpCmd string
+}
+
+// Error formats as a single line that includes Tool, the matched Pattern,
+// and HelpCmd. Stable surface — the orchestrator logs this into structured
+// output and the user-facing footer pulls HelpCmd out separately.
+func (e *LimitError) Error() string {
+	return fmt.Sprintf("rate limit hit on %s: matched %q — %s", e.Tool, e.Pattern, e.HelpCmd)
+}
+
+// DetectLimit reads the stderr file at path and reports the first pattern
+// from patterns that appears as a (case-insensitive) substring of the
+// file. Returns the matched pattern (verbatim, as supplied) and true on
+// match; "" and false on no match, missing file, or empty path.
 //
-// The regex is case-insensitive (?i) because upstream CLIs are
-// inconsistent about capitalization.
-var rateLimitRE = regexp.MustCompile(`(?i)(rate[_ ]limit(?: exceeded)?|\b429\b.*too many|too many.*\b429\b)`)
-
-// retryAfterRE captures the seconds-value of a "Retry-After: N" header
-// echoed into stderr. The trailing "s" is optional because some upstream
-// formatters omit it.
-var retryAfterRE = regexp.MustCompile(`Retry-After:\s*(\d+)s?`)
-
-// scanStderr reads the captured stderr file and reports whether it
-// looks like a rate-limit failure. When true, retryAfter carries any
-// parsed Retry-After hint (or zero if none was found, in which case
-// Run uses its 10-second default).
+// Patterns are tried in slice order; the first match wins. Callers
+// (executors) curate per-vendor lists. The runner does not own this
+// list any more (ADR-0013) — the previous package-level rateLimitRE was
+// claude-specific and broke when we added codex/gemini, whose surfaces
+// don't share Anthropic's "rate_limit exceeded" string.
 //
 // We read the whole file into memory; rate-limit messages are tiny in
-// practice (kilobytes at worst), and streaming would complicate the
-// regex match across line boundaries. If a future executor wraps the
-// CLI such that stderr can grow unbounded on success too, we should
-// move to a tail-only scan; but for now design §10 only triggers the
-// scan on non-zero exit, so the file is bounded by what the CLI
-// produces before failing.
-func scanStderr(path string) (retryAfter time.Duration, ok bool) {
-	if path == "" {
-		return 0, false
+// practice (kilobytes at worst). If a future executor wraps a CLI such
+// that stderr can grow unbounded on success too, we can move to a
+// tail-only scan; for now executors only call DetectLimit on non-zero
+// exit so the file is bounded by what the CLI produced before failing.
+func DetectLimit(stderrPath string, patterns []string) (string, bool) {
+	if stderrPath == "" || len(patterns) == 0 {
+		return "", false
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(stderrPath)
 	if err != nil {
-		return 0, false
+		return "", false
 	}
-	if !rateLimitRE.Match(data) {
-		return 0, false
-	}
-	if m := retryAfterRE.FindSubmatch(data); m != nil {
-		if n, err := strconv.Atoi(string(m[1])); err == nil && n >= 0 {
-			retryAfter = time.Duration(n) * time.Second
+	body := strings.ToLower(string(data))
+	for _, p := range patterns {
+		if p == "" {
+			continue
+		}
+		if strings.Contains(body, strings.ToLower(p)) {
+			return p, true
 		}
 	}
-	return retryAfter, true
+	return "", false
 }

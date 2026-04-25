@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fitz123/council/pkg/executor"
+	"github.com/fitz123/council/pkg/runner"
 )
 
 // writeStub drops a small POSIX-shell script in t.TempDir that:
@@ -347,5 +349,61 @@ exit 42
 	}
 	if resp.ExitCode != 42 {
 		t.Errorf("ExitCode = %d, want 42", resp.ExitCode)
+	}
+	// Generic non-zero exit must NOT be classified as a rate-limit error —
+	// the orchestrator routes *LimitError into the absorb-by-quorum path,
+	// while everything else stays a normal failure.
+	var le *runner.LimitError
+	if errors.As(err, &le) {
+		t.Errorf("non-rate-limit exit classified as LimitError: %v", err)
+	}
+}
+
+// TestExecuteWrapsRateLimitMarkers verifies ADR-0013's executor-side
+// rate-limit detection: when the captured stderr contains any of the
+// claudeLimitPatterns, the executor wraps the runner error into a
+// *runner.LimitError with Tool="claude-code", HelpCmd="claude /usage",
+// and Pattern set to the matched substring.
+func TestExecuteWrapsRateLimitMarkers(t *testing.T) {
+	for _, pattern := range claudeLimitPatterns {
+		t.Run(pattern, func(t *testing.T) {
+			dir := t.TempDir()
+			stub := filepath.Join(dir, "stub.sh")
+			// Embed the pattern verbatim into the stub's stderr so
+			// DetectLimit's case-insensitive substring scan finds it.
+			// Write the pattern to a sibling file the script `cat`s to
+			// stderr — sidesteps shell-quoting issues for patterns that
+			// contain apostrophes ("you've hit your limit").
+			markerPath := filepath.Join(dir, "marker.txt")
+			if err := os.WriteFile(markerPath, []byte(pattern+"\n"), 0o644); err != nil {
+				t.Fatalf("write marker: %v", err)
+			}
+			body := "#!/bin/sh\ncat " + markerPath + " >&2\nexit 1\n"
+			if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
+				t.Fatalf("write stub: %v", err)
+			}
+			c := &ClaudeCode{Binary: stub}
+
+			_, err := c.Execute(context.Background(), executor.Request{
+				Prompt:     "x",
+				Model:      "sonnet",
+				Timeout:    5 * time.Second,
+				StdoutFile: filepath.Join(dir, "out"),
+				StderrFile: filepath.Join(dir, "err"),
+			})
+			var le *runner.LimitError
+			if !errors.As(err, &le) {
+				t.Fatalf("err = %v, want *runner.LimitError", err)
+			}
+			if le.Tool != "claude-code" {
+				t.Errorf("LimitError.Tool = %q, want claude-code", le.Tool)
+			}
+			if le.HelpCmd != claudeHelpCmd {
+				t.Errorf("LimitError.HelpCmd = %q, want %q", le.HelpCmd, claudeHelpCmd)
+			}
+			if le.Pattern != pattern {
+				t.Errorf("LimitError.Pattern = %q, want %q", le.Pattern, pattern)
+			}
+		})
 	}
 }

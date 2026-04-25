@@ -5,13 +5,18 @@
 //
 // The executor's job is small on purpose: build the right argv + env,
 // hand off to pkg/runner, translate the result to executor.Response.
-// All the hard subprocess logic — process-group kill, timeout,
-// rate-limit retries, stderr-on-failure-only — lives in pkg/runner.
+// Subprocess concerns (process-group kill, timeout, stdout/stderr
+// capture, fail-retry) live in pkg/runner.
 //
-// Retry split (see runner package doc): we pass MaxRetries=0 to disable
-// runner-side fail-retry. The orchestrator owns fail-retry policy via
-// the profile's max_retries field. Rate-limit retries are unaffected by
-// this — those stay runner-owned.
+// Per ADR-0013, rate-limit detection is owned here, not by pkg/runner.
+// On a runner error we scan the captured stderr against claudeLimitPatterns
+// and, on match, wrap the runner error into *runner.LimitError so
+// pkg/debate can classify it via errors.As. The orchestrator does not
+// retry rate-limit failures — it absorbs them via quorum and surfaces
+// the per-CLI footer to the user when quorum is unmet.
+//
+// Retry split: we pass MaxRetries=0 to disable runner-side fail-retry.
+// pkg/debate owns fail-retry policy via the profile's max_retries field.
 package claudecode
 
 import (
@@ -30,6 +35,23 @@ import (
 // from us. 64000 matches design/v1.md §7. Centralized here so a future
 // bump (or a per-call override) has one obvious place to land.
 const envMaxOutputTokens = "CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000"
+
+// claudeLimitPatterns is the substring list DetectLimit scans the
+// captured stderr against on a non-zero exit. Lowercased, case-insensitive
+// matching is done by DetectLimit itself; entries here are kept in their
+// natural form for legibility. If a future Anthropic CLI release surfaces
+// a quota message that none of these match, add the new substring as a
+// one-liner — strict YAGNI per project convention, no regex fallback.
+var claudeLimitPatterns = []string{
+	"you've hit your limit",
+	"usage limit exceeded",
+	"anthropic rate limit",
+}
+
+// claudeHelpCmd is what we tell the user to run when claude-code is
+// rate-limited. Surfaced in the per-CLI footer the orchestrator prints on
+// ExitRateLimitQuorumFail.
+const claudeHelpCmd = "claude /usage"
 
 // ClaudeCode wraps the `claude` CLI. Binary defaults to "claude", but
 // is exported so tests can point it at a stub script. Real callers
@@ -76,8 +98,10 @@ func (c *ClaudeCode) binary() string {
 //   - empty Model (programming error — profile validator should catch
 //     this earlier; we double-check rather than letting an empty --model
 //     reach the CLI)
-//   - any error from pkg/runner (timeout, non-zero exit, or
-//     unrecoverable rate-limit)
+//   - any error from pkg/runner (timeout, non-zero exit). On non-zero
+//     exit the captured stderr is scanned for claudeLimitPatterns; on
+//     match the error is wrapped into *runner.LimitError so pkg/debate
+//     can route it through the rate-limit-quorum path.
 //
 // On error the partial Response (with Duration set) is still returned
 // so the orchestrator can populate verdict.json with whatever did
@@ -136,18 +160,22 @@ func (c *ClaudeCode) Execute(ctx context.Context, req executor.Request) (executo
 		StderrFile: req.StderrFile,
 		Timeout:    req.Timeout,
 		// MaxRetries=0 — orchestrator owns fail-retry policy. Rate-limit
-		// retries still happen inside pkg/runner; the budget is
-		// req.MaxRetries+1 per design/v1.md §10 ("retry up to
-		// max_retries + 1 times").
-		MaxRetries:          0,
-		RateLimitMaxRetries: req.MaxRetries + 1,
+		// retries do not exist any more (ADR-0013); rate-limit failures
+		// are wrapped into *LimitError below and absorbed by quorum.
+		MaxRetries: 0,
 	})
 
 	out := executor.Response{
 		ExitCode: resp.ExitCode,
 		Duration: durationOrZero(resp.Duration),
 	}
-	return out, err
+	if err != nil {
+		if pat, ok := runner.DetectLimit(req.StderrFile, claudeLimitPatterns); ok {
+			return out, &runner.LimitError{Pattern: pat, Tool: c.Name(), HelpCmd: claudeHelpCmd}
+		}
+		return out, err
+	}
+	return out, nil
 }
 
 // durationOrZero rounds nothing — kept as a one-line helper so a future

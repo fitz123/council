@@ -551,9 +551,14 @@ func readCompletedStage(dir string) (string, bool) {
 
 // runWithFailRetry runs one subprocess with the role-level retry budget.
 // The int return is the count of retries actually consumed (attempts beyond
-// the first). Rate-limit retries are runner-owned; if ErrRateLimit bubbles
-// up here the runner's budget was spent and we must not stack a second
-// budget on top (see pkg/runner docs).
+// the first).
+//
+// Rate-limit failures (executor returns *runner.LimitError per ADR-0013)
+// are NOT retried here: the orchestrator absorbs them via quorum, and a
+// rate-limited CLI is unlikely to recover within the same session anyway.
+// They surface to the caller (RunRound1 / RunRound2) which classifies
+// them via errors.As and accumulates them for the verdict's rate_limits
+// list.
 func runWithFailRetry(ctx context.Context, execName string, maxRetries int, req executor.Request) (executor.Response, error, int) {
 	exec, err := executor.Get(execName)
 	if err != nil {
@@ -575,7 +580,8 @@ func runWithFailRetry(ctx context.Context, execName string, maxRetries int, req 
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return resp, err, attempt
 		}
-		if errors.Is(err, runner.ErrRateLimit) {
+		var limitErr *runner.LimitError
+		if errors.As(err, &limitErr) {
 			return resp, err, attempt
 		}
 		if attempt >= maxRetries {
