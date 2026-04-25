@@ -490,19 +490,26 @@ func logEnd(w io.Writer, sess *session.Session, v *session.Verdict) {
 	fmt.Fprintf(w, "[%s] session folder: %s\n", ts, sess.Path)
 }
 
-// logArtifacts dumps each expert's round output and per-voter ballot blocks
-// to w after the timing summary. Lets a verbose run answer "who said what
-// and who voted for whom" without having to open files in the session folder.
-// Each section is independent: rounds with no readable output.md are skipped,
-// individual unreadable per-expert output.md files are skipped, and the
-// ballot section emits whenever v.Voting.Ballots is populated even if no
-// rounds completed (e.g. resumed session that only re-ran the voting stage).
-// All artifact bodies are scrubbed of C0/DEL control bytes via
-// stripControlBytes before being written, so a malicious or malformed LLM
-// output cannot rewrite the operator's terminal state via ANSI/OSC escapes.
+// logArtifacts dumps each expert's round output, per-voter ballot blocks,
+// and the final verdict to w after the timing summary. Lets a verbose run
+// answer "who said what, who voted for whom, and what won" without having
+// to open files in the session folder or splice stdout against stderr.
+// Each section is independent: rounds with no readable output.md are
+// skipped, individual unreadable per-expert output.md files are skipped,
+// the ballot section emits whenever v.Voting.Ballots is populated even if
+// no rounds completed (e.g. resumed session that only re-ran the voting
+// stage), and the verdict section emits when v.Voting carries either a
+// winner or a tied-candidate set. All artifact bodies are scrubbed of
+// C0/DEL/C1 control bytes via stripControlBytes before being written, so
+// a malicious or malformed LLM output cannot rewrite the operator's
+// terminal state via ANSI/OSC escapes.
 func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 	if v == nil || sess == nil {
 		return
+	}
+	realName := make(map[string]string, len(v.Experts))
+	for _, e := range v.Experts {
+		realName[e.Label] = e.RealName
 	}
 	for idx, r := range v.Rounds {
 		for _, e := range r.Experts {
@@ -516,10 +523,6 @@ func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 		}
 	}
 	if v.Voting != nil && len(v.Voting.Ballots) > 0 {
-		realName := make(map[string]string, len(v.Experts))
-		for _, e := range v.Experts {
-			realName[e.Label] = e.RealName
-		}
 		for _, b := range v.Voting.Ballots {
 			fmt.Fprintf(w, "\n=== ballot %s (%s) ===\n", b.VoterLabel, realName[b.VoterLabel])
 			path := filepath.Join(sess.Path, "voting", "votes", b.VoterLabel+".txt")
@@ -538,6 +541,20 @@ func logArtifacts(w io.Writer, sess *session.Session, v *session.Verdict) {
 			if b.VotedFor == "" {
 				fmt.Fprintln(w, "(no vote — discarded)")
 			}
+		}
+	}
+	if v.Voting != nil {
+		switch {
+		case v.Voting.Winner != "":
+			fmt.Fprintf(w, "\n=== verdict (winner: %s — %s) ===\n", v.Voting.Winner, realName[v.Voting.Winner])
+			if v.Answer != "" {
+				fmt.Fprintln(w, stripControlBytes(strings.TrimRight(v.Answer, "\n")))
+			}
+		case len(v.Voting.TiedCandidates) > 0:
+			// No winner — F12 invariant means there is no single answer
+			// to dump. Surface the tie so the operator sees the closing
+			// state without having to read verdict.json.
+			fmt.Fprintf(w, "\n=== verdict (no consensus — tied: %s) ===\n", strings.Join(v.Voting.TiedCandidates, ", "))
 		}
 	}
 }

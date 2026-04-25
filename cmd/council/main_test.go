@@ -288,6 +288,10 @@ func TestRun_Verbose(t *testing.T) {
 		// AND ballot content (happyStub emits "VOTE: A\n" for every voter).
 		"=== ballot ",
 		"VOTE: A",
+		// logArtifacts: final verdict block carries the winner label
+		// (anonymized A) plus the resolved real_name, mirrored from the
+		// stdout answer so a verbose run is self-contained on stderr.
+		"=== verdict (winner: A —",
 	} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr missing %q; got %s", want, stderr.String())
