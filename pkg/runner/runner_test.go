@@ -183,24 +183,26 @@ func TestRunNonZeroExit(t *testing.T) {
 // classification has moved to the executor layer. Even when stderr contains
 // what used to be a 429-marker phrase, Run returns ErrNonZeroExit on the
 // first attempt and never sleeps/retries.
+//
+// The functional assertions (Retries == 0, ErrNonZeroExit) are sufficient
+// to lock in the no-sleep behavior — sleep only happens between retries
+// in the runner, so zero retries means zero sleep regardless of wall-
+// clock. We deliberately avoid an elapsed-time bound because subprocess
+// + file I/O on loaded CI hosts can exceed any reasonable threshold
+// even with no sleep.
 func TestRunNoRetryOnRateLimitMarker(t *testing.T) {
 	out, errf := paths(t)
-	start := time.Now()
 	resp, err := Run(context.Background(), RunRequest{
 		Argv:       []string{"sh", "-c", `printf "rate_limit exceeded\nRetry-After: 5s\n" >&2; exit 1`},
 		StdoutFile: out,
 		StderrFile: errf,
 		Timeout:    5 * time.Second,
 	})
-	elapsed := time.Since(start)
 	if !errors.Is(err, ErrNonZeroExit) {
 		t.Fatalf("err = %v, want ErrNonZeroExit (no rate-limit retry)", err)
 	}
 	if resp.Retries != 0 {
 		t.Errorf("Retries = %d, want 0 (runner never retries rate limits)", resp.Retries)
-	}
-	if elapsed >= 1*time.Second {
-		t.Errorf("elapsed = %s — runner appears to have slept (Retry-After honored when it should not be)", elapsed)
 	}
 }
 

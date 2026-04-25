@@ -10,7 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"regexp"
 	"sync"
 	"time"
 
@@ -71,9 +71,16 @@ var initCandidates = []candidate{
 const probeTimeout = 30 * time.Second
 
 // initProbePrompt is the question the live probe sends. Short and
-// model-agnostic; we only check the answer contains "OK" (case-
-// insensitive) so we tolerate vendor preambles.
+// model-agnostic; we only check the answer contains a standalone "OK"
+// token (case-insensitive) so we tolerate vendor preambles without
+// false-matching on substrings like "BROKEN" or "BOOKED".
 const initProbePrompt = "respond with the word OK"
+
+// probeOKRE matches a standalone "OK" token in the probe response,
+// case-insensitive, so a model wrapping its answer in punctuation
+// ("OK." / "OK!") or framing prose ("Sure: OK") still verifies, but
+// "BROKEN" or "OKAY" does not.
+var probeOKRE = regexp.MustCompile(`(?i)\bOK\b`)
 
 // runInit implements `council init [--force]` (Task 7 of the v3 plan).
 // It probes the registered CLIs in parallel, then writes
@@ -242,7 +249,7 @@ func liveProbe(ctx context.Context, ex executor.Executor, model string) (bool, s
 	if err != nil {
 		return false, fmt.Sprintf("read stdout: %v", err)
 	}
-	if !strings.Contains(strings.ToUpper(string(body)), "OK") {
+	if !probeOKRE.Match(body) {
 		return false, "no OK in probe output"
 	}
 	return true, ""

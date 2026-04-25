@@ -362,3 +362,34 @@ func TestInit_UnknownFlag_ExitsConfigError(t *testing.T) {
 		t.Errorf("runInit --bogus = %d, want %d", code, exitConfigError)
 	}
 }
+
+// TestProbeOKRE locks in the probe success criterion: a standalone
+// "OK" token in the response, case-insensitive, with vendor preambles
+// allowed. Crucially, words containing the OK substring (BROKEN, OKAY,
+// LOOKING) must NOT match — that would silently accept an
+// unauthenticated CLI whose error happens to embed those letters.
+func TestProbeOKRE(t *testing.T) {
+	tests := []struct {
+		body string
+		want bool
+	}{
+		{"OK", true},
+		{"ok", true},
+		{"Ok.", true},
+		{"Sure: OK", true},
+		{"OK!\n", true},
+		{"The model says: OK", true},
+		{"BROKEN", false},
+		{"BOOKED", false},
+		{"OKAY", false},
+		{"looking good", false},
+		{"", false},
+		{"Not logged in · Please run /login", false},
+	}
+	for _, tt := range tests {
+		got := probeOKRE.MatchString(tt.body)
+		if got != tt.want {
+			t.Errorf("probeOKRE.MatchString(%q) = %v, want %v", tt.body, got, tt.want)
+		}
+	}
+}
