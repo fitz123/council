@@ -233,8 +233,12 @@ voting:
 
 // TestRun_NamedProfile_LocalHit — `-p cheap` with .council/cheap.yaml on disk
 // loads the named profile and the run completes successfully. This is the
-// happy path the multi-profile feature was added for.
+// happy path the multi-profile feature was added for. HOME is pinned to an
+// empty tempdir for hermeticity — local cwd would win even if the dev had
+// ~/.config/council/cheap.yaml, but pinning makes the test independent of
+// the surrounding system regardless.
 func TestRun_NamedProfile_LocalHit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	t.Chdir(withNamedCouncilProfile(t, t.TempDir(), "cheap"))
 	registerStub(t, happyStub())
 
@@ -312,16 +316,15 @@ func TestRun_PathProfile_Missing(t *testing.T) {
 	}
 }
 
-// TestRun_InvalidProfileName — names that fail profileNameRE are rejected
-// before any filesystem access. Covers the path-traversal shape an attacker
-// might try; ensures we never even stat such a value.
+// TestRun_InvalidProfileName — confirms the invalid-name rejection path is
+// wired all the way through `run()` to exit code + stderr. Loader-level
+// coverage of the full bad-name table (`..`, `.hidden`, `-leading-dash`,
+// `foo:bar`, `foo\bar`, empty) lives in TestLoadByName_NameMode_InvalidName;
+// here we just need one CLI-level case to prove the wiring.
 func TestRun_InvalidProfileName(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	// Bare ".." would get classified as a name (no slash, no .yaml suffix)
-	// and rejected by the regex. A `foo bar` value with whitespace covers
-	// the same regex path with a different shape.
 	code := run(context.Background(), []string{"-p", "foo bar", "q"}, strings.NewReader(""), &stdout, &stderr)
 	if code != exitConfigError {
 		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfigError, stderr.String())

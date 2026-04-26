@@ -19,20 +19,17 @@ import (
 // verdict.json and aggregate output, so anything outside `[a-zA-Z0-9_-]`
 // risks path traversal or downstream text confusion.
 // Must start with an alphanumeric to keep hidden-file shapes like ".hidden"
-// out of the session folder.
+// out of the session folder. Profile names share the same regex (they
+// become "<name>.yaml" path components under .council/ and
+// ~/.config/council/) so LoadByName aliases this rather than duplicating
+// the literal — keeps the two validators in lockstep.
 var expertNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
-// profileNameRE is the allowed character set for profile names passed via
-// `-p NAME`. Same shape as expertNameRE because profile names also become
-// filesystem path components ("<name>.yaml") under .council/ and
-// ~/.config/council/. Blocks `..`, `/`, hidden-file shapes, and shell-meta
-// characters that could otherwise traverse out of the precedence directories.
-var profileNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
-
-// ErrNoConfig is retained as a sentinel so external callers (currently none)
-// don't break, but Load now delegates to LoadByName which returns the more
-// descriptive ErrProfileNotFound. New code should rely on the per-name error.
-var ErrNoConfig = errors.New("no config file found (checked cwd/.council/default.yaml, ~/.config/council/default.yaml, embedded)")
+// profileNameRE aliases expertNameRE for the LoadByName call site. Kept as
+// a separate symbol so the validation site reads as "profile name", not
+// "expert name", but pointing at the same regex object makes drift between
+// the two impossible.
+var profileNameRE = expertNameRE
 
 // ErrInvalidProfileName is returned by LoadByName when the supplied name
 // fails profileNameRE. Wrapped with `%w` so callers can `errors.Is` it.
@@ -104,14 +101,6 @@ type yamlProfile struct {
 	SessionNonce string `yaml:"session_nonce,omitempty"`
 }
 
-// Load resolves the default profile. Equivalent to LoadByName(cwd, "default")
-// and retained as the historical entry point for callers that always wanted
-// the default. New callers that need to pick a profile by name or path
-// should use LoadByName directly.
-func Load(cwd string) (*Profile, string, error) {
-	return LoadByName(cwd, "default")
-}
-
 // LoadByName resolves a profile by `-p` value with two modes:
 //
 //   - Path mode (value contains `/` or ends in `.yaml`): the value is treated
@@ -136,11 +125,15 @@ func LoadByName(cwd, name string) (*Profile, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
-		abs, absErr := filepath.Abs(name)
-		if absErr != nil {
-			// LoadFile already abs'd internally for parsing; this is just
-			// for the returned source string. Fall back to the literal.
-			return p, name, nil
+		// LoadFile already abs'd internally for parsing; we re-abs here
+		// only for the returned source string. filepath.Abs only fails
+		// when os.Getwd fails, and LoadFile having succeeded proves
+		// it didn't, so any error here is genuinely surprising and
+		// should surface rather than silently fall back to a literal
+		// (possibly relative) path.
+		abs, err := filepath.Abs(name)
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve absolute path for %s: %w", name, err)
 		}
 		return p, abs, nil
 	}
@@ -192,10 +185,10 @@ func LoadByName(cwd, name string) (*Profile, string, error) {
 	}
 
 	if globalCandidate == "" {
-		// Home lookup didn't yield a path (no home dir). Synthesize the
-		// candidate string so the error message still tells the operator
-		// where we *would* have looked.
-		globalCandidate = filepath.Join("~", ".config", "council", name+".yaml")
+		// Home lookup hit os.ErrNotExist (no home dir at all — chroot,
+		// broken setup). Report only the local candidate so the message
+		// doesn't include a misleading literal "~" that nothing expands.
+		return nil, "", fmt.Errorf("%w: %q (checked %s; no home dir, skipped global)", ErrProfileNotFound, name, local)
 	}
 	return nil, "", fmt.Errorf("%w: %q (checked %s, %s)", ErrProfileNotFound, name, local, globalCandidate)
 }

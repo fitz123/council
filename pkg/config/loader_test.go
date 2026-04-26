@@ -866,7 +866,7 @@ func TestHasYAMLFrontmatter(t *testing.T) {
 	}
 }
 
-func TestLoad_PrecedenceLocalOverGlobal(t *testing.T) {
+func TestLoadByName_Default_PrecedenceLocalOverGlobal(t *testing.T) {
 	local := t.TempDir()
 	global := t.TempDir()
 	// Seed a global config (should be ignored because local wins).
@@ -893,9 +893,9 @@ func TestLoad_PrecedenceLocalOverGlobal(t *testing.T) {
 	userHomeDir = func() (string, error) { return global, nil }
 	t.Cleanup(func() { userHomeDir = oldHome })
 
-	p, src, err := Load(local)
+	p, src, err := LoadByName(local, "default")
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("LoadByName(default): %v", err)
 	}
 	if p.Name != "default" {
 		t.Errorf("Name = %q, want default (local should win)", p.Name)
@@ -905,7 +905,7 @@ func TestLoad_PrecedenceLocalOverGlobal(t *testing.T) {
 	}
 }
 
-func TestLoad_PrecedenceGlobalWhenNoLocal(t *testing.T) {
+func TestLoadByName_Default_PrecedenceGlobalWhenNoLocal(t *testing.T) {
 	local := t.TempDir() // no .council here
 	global := t.TempDir()
 	globalCfgDir := filepath.Join(global, ".config", "council")
@@ -925,9 +925,9 @@ func TestLoad_PrecedenceGlobalWhenNoLocal(t *testing.T) {
 	userHomeDir = func() (string, error) { return global, nil }
 	t.Cleanup(func() { userHomeDir = oldHome })
 
-	p, src, err := Load(local)
+	p, src, err := LoadByName(local, "default")
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("LoadByName(default): %v", err)
 	}
 	if p.Name != "global" {
 		t.Errorf("Name = %q, want global", p.Name)
@@ -937,12 +937,12 @@ func TestLoad_PrecedenceGlobalWhenNoLocal(t *testing.T) {
 	}
 }
 
-// TestLoad_UserHomeDirErrorIsSurfaced covers the case where userHomeDir
-// returns an unexpected error (e.g. $HOME unset under sudo). A silent
-// fall-through to embedded would hide the operator's real problem — their
-// ~/.config/council/default.yaml is being bypassed without explanation.
-// The loader must return the error instead.
-func TestLoad_UserHomeDirErrorIsSurfaced(t *testing.T) {
+// TestLoadByName_Default_UserHomeDirErrorIsSurfaced covers the case where
+// userHomeDir returns an unexpected error (e.g. $HOME unset under sudo). A
+// silent fall-through to embedded would hide the operator's real problem —
+// their ~/.config/council/default.yaml is being bypassed without
+// explanation. The loader must return the error instead.
+func TestLoadByName_Default_UserHomeDirErrorIsSurfaced(t *testing.T) {
 	local := t.TempDir() // no .council here
 
 	oldHome := userHomeDir
@@ -950,19 +950,20 @@ func TestLoad_UserHomeDirErrorIsSurfaced(t *testing.T) {
 	userHomeDir = func() (string, error) { return "", sentinel }
 	t.Cleanup(func() { userHomeDir = oldHome })
 
-	_, _, err := Load(local)
+	_, _, err := LoadByName(local, "default")
 	if err == nil {
-		t.Fatalf("Load: expected error when userHomeDir fails, got nil")
+		t.Fatalf("LoadByName(default): expected error when userHomeDir fails, got nil")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Fatalf("Load error = %v, want to wrap %v", err, sentinel)
+		t.Fatalf("LoadByName(default) error = %v, want to wrap %v", err, sentinel)
 	}
 }
 
-// TestLoad_FallsThroughToEmbedded covers the precedence-chain terminus: with
-// neither a cwd-local nor a user-global config file on disk, Load must
-// resolve the embedded profile and flag its source as SourceEmbedded.
-func TestLoad_FallsThroughToEmbedded(t *testing.T) {
+// TestLoadByName_Default_FallsThroughToEmbedded covers the precedence-chain
+// terminus for the default name: with neither a cwd-local nor a user-global
+// config file on disk, LoadByName must resolve the embedded profile and
+// flag its source as SourceEmbedded.
+func TestLoadByName_Default_FallsThroughToEmbedded(t *testing.T) {
 	local := t.TempDir()
 	home := t.TempDir() // empty
 
@@ -970,9 +971,9 @@ func TestLoad_FallsThroughToEmbedded(t *testing.T) {
 	userHomeDir = func() (string, error) { return home, nil }
 	t.Cleanup(func() { userHomeDir = oldHome })
 
-	p, src, err := Load(local)
+	p, src, err := LoadByName(local, "default")
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("LoadByName(default): %v", err)
 	}
 	if src != SourceEmbedded {
 		t.Errorf("source = %q, want %q", src, SourceEmbedded)
@@ -1225,7 +1226,9 @@ func TestLoadByName_PathMode_BareYAMLSuffix(t *testing.T) {
 
 // TestLoadByName_PathMode_Missing — a missing path is a hard error, no
 // embedded fallback. The user passed an explicit path; silently substituting
-// embedded defaults would mask a typo.
+// embedded defaults would mask a typo. Also asserts the error is NOT
+// ErrProfileNotFound (which only fires for name-mode misses) so a future
+// refactor that conflates the two paths surfaces here.
 func TestLoadByName_PathMode_Missing(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "nope.yaml")
@@ -1237,29 +1240,7 @@ func TestLoadByName_PathMode_Missing(t *testing.T) {
 	if !strings.Contains(err.Error(), "nope.yaml") {
 		t.Errorf("error %q does not name the missing path", err)
 	}
-}
-
-// TestLoad_StillCallsLoadByNameDefault — `Load(cwd)` is the back-compat
-// wrapper for `LoadByName(cwd, "default")`. Lock the contract so a future
-// refactor doesn't accidentally drop the embedded-fallback semantics callers
-// implicitly depend on.
-func TestLoad_StillCallsLoadByNameDefault(t *testing.T) {
-	local := t.TempDir()
-	home := t.TempDir()
-
-	oldHome := userHomeDir
-	userHomeDir = func() (string, error) { return home, nil }
-	t.Cleanup(func() { userHomeDir = oldHome })
-
-	pLoad, srcLoad, errLoad := Load(local)
-	pName, srcName, errName := LoadByName(local, "default")
-	if errLoad != nil || errName != nil {
-		t.Fatalf("Load=%v LoadByName=%v", errLoad, errName)
-	}
-	if srcLoad != srcName {
-		t.Errorf("Load src=%q, LoadByName(default) src=%q", srcLoad, srcName)
-	}
-	if pLoad.Name != pName.Name {
-		t.Errorf("Load Name=%q, LoadByName(default) Name=%q", pLoad.Name, pName.Name)
+	if errors.Is(err, ErrProfileNotFound) {
+		t.Errorf("path-mode miss must not surface as ErrProfileNotFound (got %v)", err)
 	}
 }

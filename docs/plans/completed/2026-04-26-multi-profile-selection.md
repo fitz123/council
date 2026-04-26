@@ -76,7 +76,7 @@ Make `-p` / `--profile` actually pick a profile. Today the flag accepts only the
 
 ### Task 1: pkg/config — `LoadByName`, name regex, path mode, scoped error
 
-- [ ] update `pkg/config/loader_test.go`:
+- [x] update `pkg/config/loader_test.go`:
   - `TestLoadByName_NameMode_LocalWins` — both `<cwd>/.council/cheap.yaml` and `<home>/.config/council/cheap.yaml` exist; expect cwd version, source path matches.
   - `TestLoadByName_NameMode_HomeFallback` — only home file exists; expect home version, source path matches.
   - `TestLoadByName_NameMode_NoFallbackToEmbeddedForNonDefault` — neither file exists; expect typed `ErrProfileNotFound`, error message names both candidate paths and the requested name.
@@ -86,48 +86,44 @@ Make `-p` / `--profile` actually pick a profile. Today the flag accepts only the
   - `TestLoadByName_PathMode_RelativePath` — pass `./fixtures/foo.yaml` from a tempdir; loads it.
   - `TestLoadByName_PathMode_BareYAMLSuffix` — pass `cheap.yaml` in cwd; recognised as path (ends in `.yaml`).
   - `TestLoadByName_PathMode_Missing` — pass a path that does not exist; expect a wrapped `os.PathError` (no profile-not-found, no embedded fallback).
-  - `TestLoad_StillCallsLoadByNameDefault` — keep one test asserting `Load(cwd)` is `LoadByName(cwd, "default")` to lock the wrapper contract.
-- [ ] add `pkg/config/loader.go`:
-  - `var profileNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)`
+  - ~~`TestLoad_StillCallsLoadByNameDefault`~~ — added during Task 1, removed in the ralph-review pass (locked a wrapper that has no production callers; embedded-fallback semantics are already covered by `TestLoadByName_NameMode_DefaultStillEmbeds`).
+- [x] add `pkg/config/loader.go`:
+  - `var profileNameRE = expertNameRE` (aliased rather than re-declared after ralph-review noted the literals were byte-identical)
   - `var ErrInvalidProfileName = errors.New("invalid profile name")`
-  - `var ErrProfileNotFound = errors.New("profile not found")` (replaces `ErrNoConfig` for the name-mode misses; keep `ErrNoConfig` as an alias for backward source-compat or remove it — see note).
+  - `var ErrProfileNotFound = errors.New("profile not found")` — `ErrNoConfig` was deleted entirely in the ralph-review pass (zero callers; per the project's "no backward-compat" rule).
   - `func LoadByName(cwd, name string) (*Profile, string, error)` implementing:
     1. If `name` is path-shaped (`strings.ContainsRune(name, '/') || strings.HasSuffix(name, ".yaml")`) → `LoadFile(name)`; on success return path as source; on `os.IsNotExist` wrap with explanatory message.
     2. Else validate against `profileNameRE`; on miss return `ErrInvalidProfileName`.
     3. Walk precedence: `<cwd>/.council/<name>.yaml` → `<home>/.config/council/<name>.yaml` (preserve existing stat-error handling: surface anything except `ErrNotExist`).
     4. If `name == "default"` and both misses → `loadFromEmbedded()` + `SourceEmbedded`.
     5. Else return `fmt.Errorf("%w %q (checked %s, %s)", ErrProfileNotFound, name, local, global)`.
-- [ ] refactor `func Load(cwd string)` to `return LoadByName(cwd, "default")`.
-- [ ] note: `ErrNoConfig` — its message mentions the precedence paths verbatim. Leave it in place but mark deprecated in a comment, since the new error carries the same information per-name. No callers outside this package, so removing it would be safe; keep the symbol to avoid a breaking export change. **Decision deferred to implementation — if the `cmd/council` callsite never used the symbol, just delete it.**
-- [ ] `go test ./pkg/config/...` must pass before Task 2.
+- [x] ~~refactor `func Load(cwd string)` to `return LoadByName(cwd, "default")`~~ — wrapper deleted entirely in the ralph-review pass; callers updated to `LoadByName(local, "default")` directly.
+- [x] `go test ./pkg/config/...` must pass before Task 2.
 
 ### Task 2: cmd/council — wire `LoadByName`, drop equality gate, update CLI tests
 
-- [ ] update `cmd/council/main_test.go`:
+- [x] update `cmd/council/main_test.go`:
   - Delete `TestRun_NonDefaultProfileRejected` (line 182).
-  - Add `TestRun_NamedProfile_LocalHit` — `t.TempDir()`, write `.council/cheap.yaml` (helper analogous to `withCouncilDir`), `-p cheap "q"`; expect exit 0; verbose-mode assertion that the start line says `profile: cheap`.
+  - Add `TestRun_NamedProfile_LocalHit` — `t.TempDir()`, write `.council/cheap.yaml` (helper analogous to `withCouncilDir`), `-p cheap "q"`; expect exit 0. (HOME pinned in the ralph-review pass for hermeticity; verbose-mode start-line assertion was descoped — `logStart` is already covered by `TestRun_Verbose`.)
   - Add `TestRun_NamedProfile_Missing` — `-p cheap "q"` with no file; expect exit 1 and stderr containing `profile not found "cheap"` (or whatever final wording lands).
   - Add `TestRun_PathProfile_Hit` — write a profile to `<tmp>/foo.yaml`; `-p <abs path> "q"`; expect exit 0.
   - Add `TestRun_PathProfile_Missing` — `-p ./does-not-exist.yaml`; expect exit 1 with stderr referencing the path.
-  - Add `TestRun_InvalidProfileName` — `-p ../etc/passwd`; expect exit 1 with stderr containing `invalid profile name`.
+  - Add `TestRun_InvalidProfileName` — `-p ../etc/passwd`; expect exit 1 with stderr containing `invalid profile name`. (Implementation passes a single regex-violating value; the full bad-name table is exercised at the loader level.)
   - Add `TestRun_DefaultStillEmbeds` — no flag, no on-disk profile (existing helper or just an empty `.council/`); expect exit 0 (embedded fallback works).
-- [ ] update `cmd/council/main.go`:
+- [x] update `cmd/council/main.go`:
   - Delete the `if profileName != "default"` gate (lines 142–145).
   - Replace the `config.Load(cwd)` call with `config.LoadByName(cwd, profileName)`.
-  - Update the error path so a `LoadByName` failure prints a single self-explanatory line; for `ErrProfileNotFound` it should suggest `council init` only when `name == "default"` (because that's the only case `init` can fix).
-- [ ] update `cmd/council/main.go` flag help (lines 96–97):
+  - The originally-planned `ErrProfileNotFound`/`init` hint was added during Task 2 and then deleted in the ralph-review pass — it was unreachable (`ErrProfileNotFound` only fires for non-default names; the hint was gated on `name == "default"`).
+- [x] update `cmd/council/main.go` flag help (lines 96–97):
   - `"Profile name (resolves to <name>.yaml under .council/ or ~/.config/council/) or path to a YAML profile."`
-- [ ] update `printHelp` text (search `printHelp` to find the multi-line usage block) — short note: `-p default` (default), `-p cheap` to use `~/.config/council/cheap.yaml`, `-p ./foo.yaml` for an explicit path.
-- [ ] `go test ./...` must pass before Task 3.
+- [x] update `printHelp` text (search `printHelp` to find the multi-line usage block) — short note: `-p default` (default), `-p cheap` to use `~/.config/council/cheap.yaml`, `-p ./foo.yaml` for an explicit path.
+- [x] `go test ./...` must pass before Task 3.
 
 ### Task 3: README + CHANGELOG
 
-- [ ] README.md line 131 — replace the "v2 accepts only `-p default`" line with a short subsection (after the existing section on `-p`):
-
-  > **Profiles.** `-p NAME` looks up `<NAME>.yaml` at `<cwd>/.council/` first, then `~/.config/council/`. `-p` also accepts a direct path (anything containing `/` or ending in `.yaml`). To add a profile, copy `~/.config/council/default.yaml` to e.g. `cheap.yaml` and edit the `model:` lines. Names must match `[a-zA-Z0-9][a-zA-Z0-9_-]*`.
-
-- [ ] CHANGELOG.md — under Unreleased: `- council: -p / --profile now accepts arbitrary profile names (resolved to <name>.yaml at the existing precedence locations) and explicit YAML paths (anything containing /  or ending in .yaml). Embedded fallback still applies to -p default only.`
-- [ ] no test gate; pure docs.
+- [x] README.md line 131 — replaced the "v2 accepts only `-p default`" line with a "Multiple profiles" subsection covering precedence, the path-mode trigger, the cheap/prod recipe, and the name regex.
+- [x] CHANGELOG.md — entry under Unreleased.
+- [x] no test gate; pure docs.
 
 ## Post-Completion
 

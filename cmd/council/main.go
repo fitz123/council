@@ -138,15 +138,7 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 
 	profile, source, err := config.LoadByName(cwd, profileName)
 	if err != nil {
-		// ErrProfileNotFound only fires for non-default names with no file
-		// on disk. Surfacing `council init` as the suggested fix would be
-		// misleading in that case (init only writes default.yaml), so the
-		// hint is gated on the default name. Other errors (invalid name,
-		// path-mode missing file, parse errors) carry their own context.
 		fmt.Fprintf(stderr, "council: %v\n", err)
-		if errors.Is(err, config.ErrProfileNotFound) && profileName == "default" {
-			fmt.Fprintln(stderr, "council: hint: run `council init` to materialise a default profile")
-		}
 		return exitConfigError
 	}
 
