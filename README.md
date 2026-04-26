@@ -132,7 +132,7 @@ Schema, field semantics, and the canonical example live in [`docs/design/v2.md`]
 
 `-p NAME` resolves to `<NAME>.yaml` at the same precedence locations as the default — `<cwd>/.council/<name>.yaml` first, then `~/.config/council/<name>.yaml`. The embedded fallback only fires for `-p default`; a non-default name with no file on disk errors out so a typo is not silently masked.
 
-`-p` also accepts a path. A value containing `/` or ending in `.yaml` is treated as an explicit path to a YAML file (`-p ./fixtures/cheap.yaml`, `-p /etc/council/prod.yaml`). Names without those characters must match `[a-zA-Z0-9][a-zA-Z0-9_-]*`.
+`-p` also accepts a path. A value containing `/` or ending in `.yaml` is treated as an explicit path to a YAML file (`-p ./fixtures/cheap.yaml`, `-p /etc/council/prod.yaml`). Names without those characters must match `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`.
 
 Typical setup for a cheap/prod split:
 

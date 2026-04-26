@@ -1173,13 +1173,13 @@ func TestLoadByName_PathMode_AbsolutePath(t *testing.T) {
 }
 
 // TestLoadByName_PathMode_RelativePath — a relative path with a slash is
-// path-mode and loads relative to whatever the OS resolves it against. We
-// chdir so the relative path resolves deterministically.
+// path-mode and resolves against the cwd argument (LoadByName joins
+// non-absolute path values with cwd before LoadFile). Covers the
+// `./<subdir>/<file>` shape; the cwd-arg-vs-process-cwd contract itself is
+// locked down by TestLoadByName_PathMode_RelativeHonoursCwdArg.
 func TestLoadByName_PathMode_RelativePath(t *testing.T) {
 	dir := t.TempDir()
 	writeProfileNamed(t, dir, "cheap", cheapYAML)
-
-	t.Chdir(dir)
 
 	p, _, err := LoadByName(dir, "./.council/cheap.yaml")
 	if err != nil {

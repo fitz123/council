@@ -14,22 +14,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// expertNameRE is the allowed character set for expert names. Names flow
-// through filepath.Join (pkg/session.Session.RoundExpertDir) and appear in
-// verdict.json and aggregate output, so anything outside `[a-zA-Z0-9_-]`
-// risks path traversal or downstream text confusion.
-// Must start with an alphanumeric to keep hidden-file shapes like ".hidden"
-// out of the session folder. Profile names share the same regex (they
-// become "<name>.yaml" path components under .council/ and
-// ~/.config/council/) so LoadByName aliases this rather than duplicating
-// the literal — keeps the two validators in lockstep.
-var expertNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
+// safeNamePattern is the allowed character set for any identifier that ends
+// up as a filesystem path component — expert names (`pkg/session.Session.
+// RoundExpertDir`) and profile names (LoadByName's `<name>.yaml` lookup).
+// Anything outside `[a-zA-Z0-9_-]` risks path traversal or downstream text
+// confusion. The leading-alphanumeric clamp keeps hidden-file shapes like
+// `.hidden` out of the session folder. Compiled once into both expertNameRE
+// and profileNameRE below so the two validators share a single source of
+// truth — change the pattern here, both validators move together.
+const safeNamePattern = `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`
 
-// profileNameRE aliases expertNameRE for the LoadByName call site. Kept as
-// a separate symbol so the validation site reads as "profile name", not
-// "expert name", but pointing at the same regex object makes drift between
-// the two impossible.
-var profileNameRE = expertNameRE
+// expertNameRE validates expert names supplied in profile YAML.
+var expertNameRE = regexp.MustCompile(safeNamePattern)
+
+// profileNameRE validates profile names supplied via `-p NAME`. Same pattern
+// as expertNameRE; the separate symbol exists so the LoadByName call site
+// reads as "profile name", not "expert name".
+var profileNameRE = regexp.MustCompile(safeNamePattern)
 
 // ErrInvalidProfileName is returned by LoadByName when the supplied name
 // fails profileNameRE. Wrapped with `%w` so callers can `errors.Is` it.

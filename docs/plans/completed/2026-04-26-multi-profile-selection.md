@@ -2,9 +2,9 @@
 
 ## Overview
 
-Make `-p` / `--profile` actually pick a profile. Today the flag accepts only the literal name `default` and any other value is rejected up-front in `cmd/council/main.go:142`; the v2/v3 multi-profile hook was left dangling. After this change the flag accepts either a **name** (resolved to `<name>.yaml` at the existing precedence locations) or an **explicit path** (when the value contains `/` or ends in `.yaml`). Use case: keep a `cheap.yaml` (haiku / gpt-mini) alongside the default `prod.yaml` (opus / gpt-5.5) and switch with one flag.
+Make `-p` / `--profile` actually pick a profile. Today the flag accepts only the literal name `default` and any other value is rejected up-front in `cmd/council/main.go:142`; the v2/v3 multi-profile hook was left dangling. After this change the flag accepts either a **name** (resolved to `<name>.yaml` at the existing precedence locations) or an **explicit path** (when the value contains `/` or ends in `.yaml`). Use case: keep the default `default.yaml` (opus / gpt-5.5), plus a `cheap.yaml` (haiku / gpt-mini), and switch with one flag.
 
-**Source of truth:** this plan + `pkg/config/loader.go` precedence comment (lines 88–93). No new ADR — the change is mechanical and stays inside the existing config + CLI surface.
+**Source of truth:** this plan + the `LoadByName` doc comment in `pkg/config/loader.go`. No new ADR — the change is mechanical and stays inside the existing config + CLI surface.
 
 ## Context (from discovery)
 
