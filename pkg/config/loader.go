@@ -121,21 +121,21 @@ type yamlProfile struct {
 // for the embedded fallback.
 func LoadByName(cwd, name string) (*Profile, string, error) {
 	if isPathMode(name) {
-		p, err := LoadFile(name)
+		// Resolve relative paths against the cwd argument, not the
+		// process working directory, so the API is consistent with
+		// name mode (which also keys off cwd). For the CLI these
+		// happen to be identical (cmd/council passes os.Getwd()), but
+		// any future caller that hands in a different cwd would
+		// otherwise get the wrong file silently.
+		path := name
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, path)
+		}
+		p, err := LoadFile(path)
 		if err != nil {
 			return nil, "", err
 		}
-		// LoadFile already abs'd internally for parsing; we re-abs here
-		// only for the returned source string. filepath.Abs only fails
-		// when os.Getwd fails, and LoadFile having succeeded proves
-		// it didn't, so any error here is genuinely surprising and
-		// should surface rather than silently fall back to a literal
-		// (possibly relative) path.
-		abs, err := filepath.Abs(name)
-		if err != nil {
-			return nil, "", fmt.Errorf("resolve absolute path for %s: %w", name, err)
-		}
-		return p, abs, nil
+		return p, path, nil
 	}
 	if !profileNameRE.MatchString(name) {
 		return nil, "", fmt.Errorf("%w: %q (must match %s)", ErrInvalidProfileName, name, profileNameRE.String())

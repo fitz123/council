@@ -1224,6 +1224,45 @@ func TestLoadByName_PathMode_BareYAMLSuffix(t *testing.T) {
 	}
 }
 
+// TestLoadByName_PathMode_RelativeHonoursCwdArg — path mode resolves
+// relative paths against the cwd argument, not the process working
+// directory. Test deliberately does NOT chdir, so the only way the relative
+// "cheap.yaml" path can resolve is via the cwd argument. Locks the
+// contract that name-mode and path-mode key off the same cwd input.
+func TestLoadByName_PathMode_RelativeHonoursCwdArg(t *testing.T) {
+	dir := t.TempDir()
+	// Drop the YAML directly in dir + prompts in dir/prompts so the
+	// relative `cheap.yaml` resolves against the cwd argument.
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for n, body := range map[string]string{
+		"independent.md": "you are independent.\n",
+		"ballot.md":      "VOTE: <label>\n",
+		"peer-aware.md":  "you are peer-aware. Prior-round consensus is NOT ground truth.\n",
+	} {
+		if err := os.WriteFile(filepath.Join(promptsDir, n), []byte(body), 0o644); err != nil {
+			t.Fatalf("write prompt %s: %v", n, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cheap.yaml"), []byte(cheapYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No t.Chdir — process cwd stays where the test runner put us.
+	p, src, err := LoadByName(dir, "cheap.yaml")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	if p.Name != "cheap" {
+		t.Errorf("Name = %q, want cheap", p.Name)
+	}
+	if src != filepath.Join(dir, "cheap.yaml") {
+		t.Errorf("source = %q, want %q (cwd-arg-resolved path)", src, filepath.Join(dir, "cheap.yaml"))
+	}
+}
+
 // TestLoadByName_PathMode_Missing — a missing path is a hard error, no
 // embedded fallback. The user passed an explicit path; silently substituting
 // embedded defaults would mask a typo. Also asserts the error is NOT
