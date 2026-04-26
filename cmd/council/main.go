@@ -93,8 +93,8 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		verbose     bool
 		showVersion bool
 	)
-	fs.StringVar(&profileName, "profile", "default", "Profile to use.")
-	fs.StringVar(&profileName, "p", "default", "Profile to use (shorthand).")
+	fs.StringVar(&profileName, "profile", "default", "Profile name (resolves <name>.yaml under .council/ or ~/.config/council/) or path to a YAML file.")
+	fs.StringVar(&profileName, "p", "default", "Profile name or path (shorthand).")
 	fs.BoolVar(&verbose, "verbose", false, "Stream structured progress to stderr.")
 	fs.BoolVar(&verbose, "v", false, "Stream structured progress to stderr (shorthand).")
 	fs.BoolVar(&showVersion, "version", false, "Print version and exit.")
@@ -136,17 +136,17 @@ func run(ctx context.Context, argv []string, stdin io.Reader, stdout, stderr io.
 		return exitConfigError
 	}
 
-	// v2 ships a single profile per location (default.yaml). Reject any
-	// other profile name up-front so a caller passing -p foo does not
-	// silently run against default.yaml. Multi-profile is a v3 hook.
-	if profileName != "default" {
-		fmt.Fprintf(stderr, "council: profile %q not supported (only \"default\" is available)\n", profileName)
-		return exitConfigError
-	}
-
-	profile, source, err := config.Load(cwd)
+	profile, source, err := config.LoadByName(cwd, profileName)
 	if err != nil {
-		fmt.Fprintf(stderr, "council: load config: %v\n", err)
+		// ErrProfileNotFound only fires for non-default names with no file
+		// on disk. Surfacing `council init` as the suggested fix would be
+		// misleading in that case (init only writes default.yaml), so the
+		// hint is gated on the default name. Other errors (invalid name,
+		// path-mode missing file, parse errors) carry their own context.
+		fmt.Fprintf(stderr, "council: %v\n", err)
+		if errors.Is(err, config.ErrProfileNotFound) && profileName == "default" {
+			fmt.Fprintln(stderr, "council: hint: run `council init` to materialise a default profile")
+		}
 		return exitConfigError
 	}
 
@@ -446,7 +446,10 @@ func printHelp(w io.Writer) {
   council --help
 
 Flags:
-  -p, --profile NAME   Profile to use (default: "default"; only "default" is currently supported).
+  -p, --profile VALUE  Profile name (resolves to <name>.yaml under .council/ or
+                       ~/.config/council/) or path to a YAML file (a value with
+                       '/' or ending in '.yaml' is treated as a path).
+                       Default: "default" (embedded fallback if no file on disk).
   -v, --verbose        Stream structured progress to stderr (also accepted by 'resume').
       --version        Print version and exit.
 

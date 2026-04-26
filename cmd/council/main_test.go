@@ -179,17 +179,176 @@ func TestRun_UnknownFlag(t *testing.T) {
 	}
 }
 
-func TestRun_NonDefaultProfileRejected(t *testing.T) {
+// withNamedCouncilProfile writes .council/<name>.yaml + the standard prompt
+// seeds under dir, and returns dir. Sibling of withCouncilDir for the
+// multi-profile test matrix; the YAML is the same 3-expert shape so
+// happyStub continues to work without per-test customisation.
+func withNamedCouncilProfile(t *testing.T, dir, name string) string {
+	t.Helper()
+	councilDir := filepath.Join(dir, ".council")
+	promptsDir := filepath.Join(councilDir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for fn, body := range map[string]string{
+		"independent.md": "You are an independent expert.\n",
+		"peer-aware.md":  "You are a peer-aware expert.\n",
+		"ballot.md":      "You are a voter. Output VOTE: <label>.\n",
+	} {
+		if err := os.WriteFile(filepath.Join(promptsDir, fn), []byte(body), 0o644); err != nil {
+			t.Fatalf("write prompt %s: %v", fn, err)
+		}
+	}
+	yaml := `version: 2
+name: ` + name + `
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 5s
+  - name: expert_2
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 5s
+  - name: expert_3
+    executor: claude-code
+    model: sonnet
+    prompt_file: prompts/independent.md
+    timeout: 5s
+quorum: 1
+max_retries: 0
+rounds: 2
+round_2_prompt_file: prompts/peer-aware.md
+voting:
+  ballot_prompt_file: prompts/ballot.md
+  timeout: 5s
+`
+	if err := os.WriteFile(filepath.Join(councilDir, name+".yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+	return dir
+}
+
+// TestRun_NamedProfile_LocalHit — `-p cheap` with .council/cheap.yaml on disk
+// loads the named profile and the run completes successfully. This is the
+// happy path the multi-profile feature was added for.
+func TestRun_NamedProfile_LocalHit(t *testing.T) {
+	t.Chdir(withNamedCouncilProfile(t, t.TempDir(), "cheap"))
+	registerStub(t, happyStub())
+
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"-p", "code-review", "q"}, strings.NewReader(""), &stdout, &stderr)
+	code := run(context.Background(), []string{"-p", "cheap", "what is 2+2?"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "body-A") {
+		t.Errorf("stdout = %q, want contains body-A", stdout.String())
+	}
+}
+
+// TestRun_NamedProfile_Missing — `-p cheap` with no file anywhere errors out
+// (no embedded fallback for non-default names) and the message names what we
+// actually looked for so the user can fix the typo. HOME is pinned to an
+// empty tempdir so the dev's real ~/.config/council/cheap.yaml (if any)
+// doesn't accidentally satisfy the lookup.
+func TestRun_NamedProfile_Missing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-p", "cheap", "q"}, strings.NewReader(""), &stdout, &stderr)
 	if code != exitConfigError {
-		t.Errorf("exit = %d, want %d", code, exitConfigError)
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfigError, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "code-review") {
-		t.Errorf("stderr missing bad profile name: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "cheap") {
+		t.Errorf("stderr missing profile name: %q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "not supported") {
-		t.Errorf("stderr missing rejection hint: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "profile not found") {
+		t.Errorf("stderr missing not-found hint: %q", stderr.String())
+	}
+}
+
+// TestRun_PathProfile_Hit — `-p <abs path>` loads the file directly,
+// bypassing the precedence walk. The session lands under the working dir's
+// .council/sessions/, not under wherever the YAML lives.
+func TestRun_PathProfile_Hit(t *testing.T) {
+	profileDir := withNamedCouncilProfile(t, t.TempDir(), "cheap")
+	abs := filepath.Join(profileDir, ".council", "cheap.yaml")
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	registerStub(t, happyStub())
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-p", abs, "what is 2+2?"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "body-A") {
+		t.Errorf("stdout = %q, want contains body-A", stdout.String())
+	}
+	// Session lands in the working dir, not next to the YAML.
+	sessions, _ := filepath.Glob(filepath.Join(cwd, ".council", "sessions", "*"))
+	if len(sessions) != 1 {
+		t.Errorf("expected 1 session under cwd, got %d (%v)", len(sessions), sessions)
+	}
+}
+
+// TestRun_PathProfile_Missing — explicit path that doesn't exist is a hard
+// error; no fallback to embedded. The user typed a path; substituting the
+// embedded default would silently mask a typo.
+func TestRun_PathProfile_Missing(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-p", "./does-not-exist.yaml", "q"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitConfigError {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfigError, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "does-not-exist.yaml") {
+		t.Errorf("stderr missing path: %q", stderr.String())
+	}
+}
+
+// TestRun_InvalidProfileName — names that fail profileNameRE are rejected
+// before any filesystem access. Covers the path-traversal shape an attacker
+// might try; ensures we never even stat such a value.
+func TestRun_InvalidProfileName(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	// Bare ".." would get classified as a name (no slash, no .yaml suffix)
+	// and rejected by the regex. A `foo bar` value with whitespace covers
+	// the same regex path with a different shape.
+	code := run(context.Background(), []string{"-p", "foo bar", "q"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitConfigError {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfigError, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid profile name") {
+		t.Errorf("stderr missing invalid-name hint: %q", stderr.String())
+	}
+}
+
+// TestRun_DefaultStillEmbeds — with no on-disk profile and no -p flag, the
+// embedded default still runs. This is the zero-config UX the embedded
+// fallback exists to preserve; the multi-profile change must not regress it.
+// HOME is pointed at an empty tempdir so the dev's real
+// ~/.config/council/default.yaml (if any) doesn't intercept the precedence
+// walk.
+func TestRun_DefaultStillEmbeds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	registerStub(t, happyStub())
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"q"}, strings.NewReader(""), &stdout, &stderr)
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0 (stderr=%s)", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "body-A") {
+		t.Errorf("stdout = %q, want contains body-A", stdout.String())
 	}
 }
 

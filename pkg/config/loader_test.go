@@ -12,23 +12,57 @@ import (
 // writeProfile writes a .council/default.yaml under dir with the given YAML
 // body plus the prompt files referenced by the v2 default profile shape.
 func writeProfile(t *testing.T, dir string, yamlBody string) string {
+	return writeProfileNamed(t, dir, "default", yamlBody)
+}
+
+// writeProfileNamed is the multi-profile-aware variant: writes
+// .council/<name>.yaml under dir alongside the standard prompt seeds. Used by
+// the LoadByName tests to stage non-default profiles without re-seeding
+// prompts in every case.
+func writeProfileNamed(t *testing.T, dir, name, yamlBody string) string {
 	t.Helper()
 	councilDir := filepath.Join(dir, ".council")
 	promptsDir := filepath.Join(councilDir, "prompts")
 	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	for name, body := range map[string]string{
+	for n, body := range map[string]string{
 		"independent.md": "you are independent.\n",
 		"ballot.md":      "VOTE: <label>\n",
 		"peer-aware.md":  "you are peer-aware. Prior-round consensus is NOT ground truth.\n",
 		"critic.md":      "you are a critic.\n",
 	} {
-		if err := os.WriteFile(filepath.Join(promptsDir, name), []byte(body), 0o644); err != nil {
-			t.Fatalf("write prompt %s: %v", name, err)
+		if err := os.WriteFile(filepath.Join(promptsDir, n), []byte(body), 0o644); err != nil {
+			t.Fatalf("write prompt %s: %v", n, err)
 		}
 	}
-	cfg := filepath.Join(councilDir, "default.yaml")
+	cfg := filepath.Join(councilDir, name+".yaml")
+	if err := os.WriteFile(cfg, []byte(yamlBody), 0o644); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+	return cfg
+}
+
+// writeGlobalProfileNamed writes a profile under <home>/.config/council/<name>.yaml
+// plus the prompt seeds the YAML references. Returns the absolute path of the
+// written YAML so tests can assert on the source path returned by LoadByName.
+func writeGlobalProfileNamed(t *testing.T, home, name, yamlBody string) string {
+	t.Helper()
+	cfgDir := filepath.Join(home, ".config", "council")
+	promptsDir := filepath.Join(cfgDir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for n, body := range map[string]string{
+		"independent.md": "you are independent.\n",
+		"ballot.md":      "VOTE: <label>\n",
+		"peer-aware.md":  "you are peer-aware. Prior-round consensus is NOT ground truth.\n",
+	} {
+		if err := os.WriteFile(filepath.Join(promptsDir, n), []byte(body), 0o644); err != nil {
+			t.Fatalf("write prompt %s: %v", n, err)
+		}
+	}
+	cfg := filepath.Join(cfgDir, name+".yaml")
 	if err := os.WriteFile(cfg, []byte(yamlBody), 0o644); err != nil {
 		t.Fatalf("write yaml: %v", err)
 	}
@@ -951,5 +985,281 @@ func TestLoad_FallsThroughToEmbedded(t *testing.T) {
 	}
 	if p.Rounds != 2 {
 		t.Errorf("Rounds = %d, want 2", p.Rounds)
+	}
+}
+
+// --- LoadByName: name-mode tests ---
+
+// cheapYAML is a distinguishably-named profile body so tests can assert that
+// LoadByName actually loaded the cheap.yaml file (not, say, embedded default
+// or a sibling default.yaml). Same shape as validYAML otherwise.
+const cheapYAML = `version: 2
+name: cheap
+experts:
+  - name: expert_1
+    executor: claude-code
+    model: haiku
+    prompt_file: prompts/independent.md
+    timeout: 60s
+quorum: 1
+max_retries: 0
+rounds: 2
+round_2_prompt_file: prompts/peer-aware.md
+voting:
+  ballot_prompt_file: prompts/ballot.md
+  timeout: 60s
+`
+
+// TestLoadByName_NameMode_LocalWins — when both <cwd>/.council/cheap.yaml and
+// <home>/.config/council/cheap.yaml exist, the local copy wins (same
+// precedence rule that Load already enforces for default.yaml).
+func TestLoadByName_NameMode_LocalWins(t *testing.T) {
+	local := t.TempDir()
+	home := t.TempDir()
+
+	writeProfileNamed(t, local, "cheap", cheapYAML)
+	// Distinguishable global so a wrong pick is detectable.
+	globalYAML := strings.Replace(cheapYAML, "name: cheap", "name: cheap_global", 1)
+	writeGlobalProfileNamed(t, home, "cheap", globalYAML)
+
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	p, src, err := LoadByName(local, "cheap")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	if p.Name != "cheap" {
+		t.Errorf("Name = %q, want cheap (local should win)", p.Name)
+	}
+	if !strings.Contains(src, local) {
+		t.Errorf("source %q does not reference local cwd %q", src, local)
+	}
+	if !strings.HasSuffix(src, "cheap.yaml") {
+		t.Errorf("source %q does not end in cheap.yaml", src)
+	}
+}
+
+// TestLoadByName_NameMode_HomeFallback — when only the home file exists,
+// LoadByName picks it up and the source path points at the home location.
+func TestLoadByName_NameMode_HomeFallback(t *testing.T) {
+	local := t.TempDir() // no .council here
+	home := t.TempDir()
+	cfgPath := writeGlobalProfileNamed(t, home, "cheap", cheapYAML)
+
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	p, src, err := LoadByName(local, "cheap")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	if p.Name != "cheap" {
+		t.Errorf("Name = %q, want cheap", p.Name)
+	}
+	if src != cfgPath {
+		t.Errorf("source = %q, want %q", src, cfgPath)
+	}
+}
+
+// TestLoadByName_NameMode_NoEmbedFallbackForNonDefault — the embedded fallback
+// is reserved for `-p default` (zero-config UX). A named profile with no file
+// on disk must error out, not silently substitute the embedded default — the
+// user explicitly named "cheap"; falling back to default would be surprising.
+func TestLoadByName_NameMode_NoEmbedFallbackForNonDefault(t *testing.T) {
+	local := t.TempDir()
+	home := t.TempDir()
+
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	_, _, err := LoadByName(local, "cheap")
+	if err == nil {
+		t.Fatalf("LoadByName: expected error for missing non-default profile, got nil")
+	}
+	if !errors.Is(err, ErrProfileNotFound) {
+		t.Errorf("LoadByName error = %v, want to wrap ErrProfileNotFound", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"cheap", local, home} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing substring %q (so the user can see what was checked)", msg, want)
+		}
+	}
+}
+
+// TestLoadByName_NameMode_DefaultStillEmbeds — `-p default` (the historical
+// default flag value) keeps the embedded fallback so a fresh install with no
+// config file still runs.
+func TestLoadByName_NameMode_DefaultStillEmbeds(t *testing.T) {
+	local := t.TempDir()
+	home := t.TempDir()
+
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	p, src, err := LoadByName(local, "default")
+	if err != nil {
+		t.Fatalf("LoadByName(default): %v", err)
+	}
+	if src != SourceEmbedded {
+		t.Errorf("source = %q, want %q", src, SourceEmbedded)
+	}
+	if p.Name != "default" {
+		t.Errorf("Name = %q, want default", p.Name)
+	}
+}
+
+// TestLoadByName_NameMode_InvalidName — names that fail profileNameRE are
+// rejected before any filesystem access. Covers path-traversal shapes,
+// hidden-file shapes, leading dashes, spaces, and the empty string.
+func TestLoadByName_NameMode_InvalidName(t *testing.T) {
+	local := t.TempDir()
+	home := t.TempDir()
+
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	cases := []string{
+		"",
+		"..",
+		".hidden",
+		"-leading-dash",
+		"foo bar",
+		"foo:bar",
+		`foo\bar`,
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := LoadByName(local, name)
+			if err == nil {
+				t.Fatalf("LoadByName(%q): expected error, got nil", name)
+			}
+			if !errors.Is(err, ErrInvalidProfileName) {
+				t.Errorf("LoadByName(%q) error = %v, want to wrap ErrInvalidProfileName", name, err)
+			}
+		})
+	}
+}
+
+// --- LoadByName: path-mode tests ---
+
+// TestLoadByName_PathMode_AbsolutePath — an absolute path bypasses the name
+// precedence walk entirely and loads the file directly.
+func TestLoadByName_PathMode_AbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeProfileNamed(t, dir, "cheap", cheapYAML)
+
+	if !filepath.IsAbs(cfgPath) {
+		t.Fatalf("test setup: writeProfileNamed returned non-absolute %q", cfgPath)
+	}
+
+	p, src, err := LoadByName(t.TempDir(), cfgPath)
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	if p.Name != "cheap" {
+		t.Errorf("Name = %q, want cheap", p.Name)
+	}
+	if src != cfgPath {
+		t.Errorf("source = %q, want %q", src, cfgPath)
+	}
+}
+
+// TestLoadByName_PathMode_RelativePath — a relative path with a slash is
+// path-mode and loads relative to whatever the OS resolves it against. We
+// chdir so the relative path resolves deterministically.
+func TestLoadByName_PathMode_RelativePath(t *testing.T) {
+	dir := t.TempDir()
+	writeProfileNamed(t, dir, "cheap", cheapYAML)
+
+	t.Chdir(dir)
+
+	p, _, err := LoadByName(dir, "./.council/cheap.yaml")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	if p.Name != "cheap" {
+		t.Errorf("Name = %q, want cheap", p.Name)
+	}
+}
+
+// TestLoadByName_PathMode_BareYAMLSuffix — a bare filename ending in .yaml is
+// path-mode (no slash, but the suffix is the trigger). Resolves against cwd.
+func TestLoadByName_PathMode_BareYAMLSuffix(t *testing.T) {
+	dir := t.TempDir()
+	// Drop the file directly in dir (no .council/ prefix) so the bare path
+	// "cheap.yaml" resolves there.
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for n, body := range map[string]string{
+		"independent.md": "you are independent.\n",
+		"ballot.md":      "VOTE: <label>\n",
+		"peer-aware.md":  "you are peer-aware. Prior-round consensus is NOT ground truth.\n",
+	} {
+		if err := os.WriteFile(filepath.Join(promptsDir, n), []byte(body), 0o644); err != nil {
+			t.Fatalf("write prompt %s: %v", n, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cheap.yaml"), []byte(cheapYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(dir)
+
+	p, _, err := LoadByName(dir, "cheap.yaml")
+	if err != nil {
+		t.Fatalf("LoadByName: %v", err)
+	}
+	if p.Name != "cheap" {
+		t.Errorf("Name = %q, want cheap", p.Name)
+	}
+}
+
+// TestLoadByName_PathMode_Missing — a missing path is a hard error, no
+// embedded fallback. The user passed an explicit path; silently substituting
+// embedded defaults would mask a typo.
+func TestLoadByName_PathMode_Missing(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "nope.yaml")
+
+	_, _, err := LoadByName(dir, missing)
+	if err == nil {
+		t.Fatalf("LoadByName: expected error for missing path, got nil")
+	}
+	if !strings.Contains(err.Error(), "nope.yaml") {
+		t.Errorf("error %q does not name the missing path", err)
+	}
+}
+
+// TestLoad_StillCallsLoadByNameDefault — `Load(cwd)` is the back-compat
+// wrapper for `LoadByName(cwd, "default")`. Lock the contract so a future
+// refactor doesn't accidentally drop the embedded-fallback semantics callers
+// implicitly depend on.
+func TestLoad_StillCallsLoadByNameDefault(t *testing.T) {
+	local := t.TempDir()
+	home := t.TempDir()
+
+	oldHome := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	pLoad, srcLoad, errLoad := Load(local)
+	pName, srcName, errName := LoadByName(local, "default")
+	if errLoad != nil || errName != nil {
+		t.Fatalf("Load=%v LoadByName=%v", errLoad, errName)
+	}
+	if srcLoad != srcName {
+		t.Errorf("Load src=%q, LoadByName(default) src=%q", srcLoad, srcName)
+	}
+	if pLoad.Name != pName.Name {
+		t.Errorf("Load Name=%q, LoadByName(default) Name=%q", pLoad.Name, pName.Name)
 	}
 }

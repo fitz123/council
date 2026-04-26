@@ -22,9 +22,28 @@ import (
 // out of the session folder.
 var expertNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
-// ErrNoConfig is returned by Load when no config file is found at any of the
-// precedence locations and the embedded defaults are unavailable.
+// profileNameRE is the allowed character set for profile names passed via
+// `-p NAME`. Same shape as expertNameRE because profile names also become
+// filesystem path components ("<name>.yaml") under .council/ and
+// ~/.config/council/. Blocks `..`, `/`, hidden-file shapes, and shell-meta
+// characters that could otherwise traverse out of the precedence directories.
+var profileNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
+
+// ErrNoConfig is retained as a sentinel so external callers (currently none)
+// don't break, but Load now delegates to LoadByName which returns the more
+// descriptive ErrProfileNotFound. New code should rely on the per-name error.
 var ErrNoConfig = errors.New("no config file found (checked cwd/.council/default.yaml, ~/.config/council/default.yaml, embedded)")
+
+// ErrInvalidProfileName is returned by LoadByName when the supplied name
+// fails profileNameRE. Wrapped with `%w` so callers can `errors.Is` it.
+var ErrInvalidProfileName = errors.New("invalid profile name")
+
+// ErrProfileNotFound is returned by LoadByName for a non-default name that
+// has no <name>.yaml at either precedence location. The wrapping error
+// message names the candidate paths so the operator can see what was
+// checked. Default-name misses do not return this — they fall back to the
+// embedded profile (zero-config UX).
+var ErrProfileNotFound = errors.New("profile not found")
 
 // userHomeDir is var-indirect so tests can override the user home directory
 // without touching the environment.
@@ -85,15 +104,51 @@ type yamlProfile struct {
 	SessionNonce string `yaml:"session_nonce,omitempty"`
 }
 
-// Load resolves the profile with precedence:
-//  1. <cwd>/.council/default.yaml
-//  2. <home>/.config/council/default.yaml
-//  3. embedded defaults
-//
-// It returns the parsed Profile, the source path ("embedded" for the embedded
-// fallback), and any error.
+// Load resolves the default profile. Equivalent to LoadByName(cwd, "default")
+// and retained as the historical entry point for callers that always wanted
+// the default. New callers that need to pick a profile by name or path
+// should use LoadByName directly.
 func Load(cwd string) (*Profile, string, error) {
-	local := filepath.Join(cwd, ".council", "default.yaml")
+	return LoadByName(cwd, "default")
+}
+
+// LoadByName resolves a profile by `-p` value with two modes:
+//
+//   - Path mode (value contains `/` or ends in `.yaml`): the value is treated
+//     as an explicit path to a YAML file and loaded via LoadFile. There is no
+//     fallback — a missing path is a hard error so a typo is not silently
+//     masked by the embedded default.
+//
+//   - Name mode (anything else): the value must satisfy profileNameRE. It is
+//     resolved with the same precedence Load used for default.yaml:
+//     1. <cwd>/.council/<name>.yaml
+//     2. <home>/.config/council/<name>.yaml
+//     3. embedded defaults — only when name == "default"
+//
+//     A non-default name that misses both on-disk locations returns
+//     ErrProfileNotFound; the wrapping error names both candidate paths.
+//
+// The returned source string is the path actually loaded, or SourceEmbedded
+// for the embedded fallback.
+func LoadByName(cwd, name string) (*Profile, string, error) {
+	if isPathMode(name) {
+		p, err := LoadFile(name)
+		if err != nil {
+			return nil, "", err
+		}
+		abs, absErr := filepath.Abs(name)
+		if absErr != nil {
+			// LoadFile already abs'd internally for parsing; this is just
+			// for the returned source string. Fall back to the literal.
+			return p, name, nil
+		}
+		return p, abs, nil
+	}
+	if !profileNameRE.MatchString(name) {
+		return nil, "", fmt.Errorf("%w: %q (must match %s)", ErrInvalidProfileName, name, profileNameRE.String())
+	}
+
+	local := filepath.Join(cwd, ".council", name+".yaml")
 	switch _, err := os.Stat(local); {
 	case err == nil:
 		p, err := LoadFile(local)
@@ -104,32 +159,54 @@ func Load(cwd string) (*Profile, string, error) {
 		// which could run a profile the operator didn't intend.
 		return nil, "", fmt.Errorf("stat %s: %w", local, err)
 	}
+
+	var globalCandidate string
 	home, homeErr := userHomeDir()
 	switch {
 	case homeErr == nil:
-		global := filepath.Join(home, ".config", "council", "default.yaml")
-		switch _, err := os.Stat(global); {
+		globalCandidate = filepath.Join(home, ".config", "council", name+".yaml")
+		switch _, err := os.Stat(globalCandidate); {
 		case err == nil:
-			p, err := LoadFile(global)
-			return p, global, err
+			p, err := LoadFile(globalCandidate)
+			return p, globalCandidate, err
 		case !errors.Is(err, fs.ErrNotExist):
-			return nil, "", fmt.Errorf("stat %s: %w", global, err)
+			return nil, "", fmt.Errorf("stat %s: %w", globalCandidate, err)
 		}
 	case errors.Is(homeErr, os.ErrNotExist):
 		// No home dir at all (chroot, broken setup). Treat like "global
-		// config absent" and fall through to embedded.
+		// config absent" and fall through to the per-name terminus.
 	default:
 		// $HOME unset under sudo, a race on the passwd DB, or some other
 		// UserHomeDir failure. Surface rather than silently running with
 		// embedded defaults: the operator who keeps a profile at
-		// ~/.config/council/default.yaml must see why it's being bypassed.
+		// ~/.config/council/<name>.yaml must see why it's being bypassed.
 		return nil, "", fmt.Errorf("resolve user home: %w", homeErr)
 	}
-	p, err := loadFromEmbedded()
-	if err != nil {
-		return nil, "", err
+
+	if name == "default" {
+		p, err := loadFromEmbedded()
+		if err != nil {
+			return nil, "", err
+		}
+		return p, SourceEmbedded, nil
 	}
-	return p, SourceEmbedded, nil
+
+	if globalCandidate == "" {
+		// Home lookup didn't yield a path (no home dir). Synthesize the
+		// candidate string so the error message still tells the operator
+		// where we *would* have looked.
+		globalCandidate = filepath.Join("~", ".config", "council", name+".yaml")
+	}
+	return nil, "", fmt.Errorf("%w: %q (checked %s, %s)", ErrProfileNotFound, name, local, globalCandidate)
+}
+
+// isPathMode classifies a `-p` value as a path (vs. a name). Anything
+// containing `/` or ending in `.yaml` is a path; everything else is a name.
+// The two triggers cover absolute paths, relative paths, and bare filenames
+// like `cheap.yaml` while leaving short identifiers like `cheap` and `prod`
+// in name mode where the precedence walk applies.
+func isPathMode(value string) bool {
+	return strings.ContainsRune(value, '/') || strings.HasSuffix(value, ".yaml")
 }
 
 // LoadFile loads and validates a YAML profile at path. prompt_file values are
