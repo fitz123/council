@@ -136,8 +136,10 @@ func RunBallot(ctx context.Context, cfg BallotConfig, question, aggregateMD stri
 	experts := append([]LabeledExpert(nil), cfg.Experts...)
 	sort.Slice(experts, func(i, j int) bool { return experts[i].Label < experts[j].Label })
 	active := make(map[string]bool, len(experts))
+	realNames := make(map[string]string, len(experts))
 	for _, ex := range experts {
 		active[ex.Label] = true
+		realNames[ex.Label] = ex.Role.Name
 	}
 
 	ballots := make([]Ballot, len(experts))
@@ -146,7 +148,7 @@ func RunBallot(ctx context.Context, cfg BallotConfig, question, aggregateMD stri
 		wg.Add(1)
 		go func(i int, ex LabeledExpert) {
 			defer wg.Done()
-			ballots[i] = runOneBallot(ctx, cfg, ex, question, aggregateMD, active)
+			ballots[i] = runOneBallot(ctx, cfg, ex, question, aggregateMD, active, realNames)
 		}(i, ex)
 	}
 	wg.Wait()
@@ -157,11 +159,11 @@ func RunBallot(ctx context.Context, cfg BallotConfig, question, aggregateMD stri
 // Order of rejection: subprocess error → forgery → malformed output → vote
 // for inactive label. Each rejection yields VotedFor="" but is otherwise
 // silent — malformed ballots are a known D8 failure mode, not a run abort.
-func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, question, aggregateMD string, active map[string]bool) Ballot {
+func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, question, aggregateMD string, active map[string]bool, realNames map[string]string) Ballot {
 	result := Ballot{VoterLabel: ex.Label}
 	resumed := false
 	var reportBody []byte
-	defer func() { reportBallot(cfg.Reporter, ex, cfg.Experts, &result, reportBody, resumed) }()
+	defer func() { reportBallot(cfg.Reporter, ex, realNames, &result, reportBody, resumed) }()
 
 	votesDir := filepath.Join(cfg.Session.Path, "voting", "votes")
 	stdoutPath := filepath.Join(votesDir, ex.Label+".txt")

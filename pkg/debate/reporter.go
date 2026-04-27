@@ -131,18 +131,15 @@ func reportRoundExpert(rep Reporter, round int, ex LabeledExpert, r *RoundOutput
 // pointer-to-result pattern as reportRoundExpert so the defer reflects the
 // final outcome (success, discarded, or rate-limited). RunBallot normalizes
 // a nil BallotConfig.Reporter to NopReporter{} before fanning out, so this
-// callee can assume rep is always non-nil. candidates is the active cohort
-// passed through so the reporter can resolve b.VotedFor to a real name —
-// the renderer would otherwise have only the anonymized letter to show.
-func reportBallot(rep Reporter, ex LabeledExpert, candidates []LabeledExpert, b *Ballot, body []byte, resumed bool) {
+// callee can assume rep is always non-nil. realNames is a precomputed
+// label->Role.Name map for the active cohort: built once in RunBallot
+// against the same defensive copy used to derive `active`, so reporting
+// resolves b.VotedFor in O(1) and never reads through the unsorted shared
+// cfg.Experts slice header.
+func reportBallot(rep Reporter, ex LabeledExpert, realNames map[string]string, b *Ballot, body []byte, resumed bool) {
 	var votedForRealName string
 	if b.VotedFor != "" {
-		for _, c := range candidates {
-			if c.Label == b.VotedFor {
-				votedForRealName = c.Role.Name
-				break
-			}
-		}
+		votedForRealName = realNames[b.VotedFor]
 	}
 	rep.OnStageDone(StageEvent{
 		Kind:             "ballot",
