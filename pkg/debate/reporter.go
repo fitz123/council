@@ -63,6 +63,14 @@ type StageEvent struct {
 	// for an inactive label).
 	VotedFor string
 
+	// VotedForRealName is the human-readable name of the candidate the
+	// voter chose, resolved from the active cohort at ballot-fan-out time.
+	// Empty when VotedFor == "" (discarded ballot) or when the chosen label
+	// is not in the active cohort. Lets the live stream render
+	// "voted for X (realname)" without the operator having to cross-
+	// reference verdict.json's anonymization map afterwards.
+	VotedForRealName string
+
 	// RejectedReason discriminates ballot-discard paths (one of the
 	// debate.BallotRejected* constants). Empty for round-expert events
 	// and for successful ballots. Lets the renderer distinguish the
@@ -123,19 +131,28 @@ func reportRoundExpert(rep Reporter, round int, ex LabeledExpert, r *RoundOutput
 // pointer-to-result pattern as reportRoundExpert so the defer reflects the
 // final outcome (success, discarded, or rate-limited). RunBallot normalizes
 // a nil BallotConfig.Reporter to NopReporter{} before fanning out, so this
-// callee can assume rep is always non-nil.
-func reportBallot(rep Reporter, ex LabeledExpert, b *Ballot, body []byte, resumed bool) {
+// callee can assume rep is always non-nil. realNames is a precomputed
+// label->Role.Name map for the active cohort: built once in RunBallot
+// against the same defensive copy used to derive `active`, so reporting
+// resolves b.VotedFor in O(1) and never reads through the unsorted shared
+// cfg.Experts slice header.
+func reportBallot(rep Reporter, ex LabeledExpert, realNames map[string]string, b *Ballot, body []byte, resumed bool) {
+	var votedForRealName string
+	if b.VotedFor != "" {
+		votedForRealName = realNames[b.VotedFor]
+	}
 	rep.OnStageDone(StageEvent{
-		Kind:           "ballot",
-		Round:          0,
-		Label:          ex.Label,
-		RealName:       ex.Role.Name,
-		Body:           body,
-		VotedFor:       b.VotedFor,
-		RejectedReason: b.RejectedReason,
-		LimitErr:       b.LimitErr,
-		Duration:       time.Duration(b.DurationSeconds * float64(time.Second)),
-		Retries:        b.Retries,
-		Resumed:        resumed,
+		Kind:             "ballot",
+		Round:            0,
+		Label:            ex.Label,
+		RealName:         ex.Role.Name,
+		Body:             body,
+		VotedFor:         b.VotedFor,
+		VotedForRealName: votedForRealName,
+		RejectedReason:   b.RejectedReason,
+		LimitErr:         b.LimitErr,
+		Duration:         time.Duration(b.DurationSeconds * float64(time.Second)),
+		Retries:          b.Retries,
+		Resumed:          resumed,
 	})
 }

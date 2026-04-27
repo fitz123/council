@@ -143,7 +143,8 @@ func TestReporter_RunRound1_FailedFiresWithFailedState(t *testing.T) {
 
 // TestReporter_RunBallot_FiresPerVoter pins the ballot-stage analogue:
 // each voter produces one event with the parsed VotedFor reflecting the
-// final state.
+// final state. Also confirms VotedForRealName resolves against the active
+// cohort so the live stream can render "voted for A (realname)".
 func TestReporter_RunBallot_FiresPerVoter(t *testing.T) {
 	exec := &testExec{
 		name: testExecName,
@@ -151,13 +152,24 @@ func TestReporter_RunBallot_FiresPerVoter(t *testing.T) {
 			return "VOTE: A\n", nil
 		},
 	}
-	cfg, _ := setupBallotTest(t, "abcdef0012345678", exec)
+	cfg, labeled := setupBallotTest(t, "abcdef0012345678", exec)
 	rep := &recordingReporter{}
 	cfg.Reporter = rep
 
 	ballots, err := RunBallot(context.Background(), cfg, "q?", "agg")
 	if err != nil {
 		t.Fatalf("RunBallot: %v", err)
+	}
+
+	var wantRealNameForA string
+	for _, ex := range labeled {
+		if ex.Label == "A" {
+			wantRealNameForA = ex.Role.Name
+			break
+		}
+	}
+	if wantRealNameForA == "" {
+		t.Fatal("no expert with label A in fixture")
 	}
 
 	events := rep.snapshot()
@@ -176,6 +188,10 @@ func TestReporter_RunBallot_FiresPerVoter(t *testing.T) {
 		}
 		if ev.VotedFor != "A" {
 			t.Errorf("voter %s: VotedFor = %q, want A", b.VoterLabel, ev.VotedFor)
+		}
+		if ev.VotedForRealName != wantRealNameForA {
+			t.Errorf("voter %s: VotedForRealName = %q, want %q",
+				b.VoterLabel, ev.VotedForRealName, wantRealNameForA)
 		}
 		if string(ev.Body) != "VOTE: A\n" {
 			t.Errorf("voter %s: Body = %q, want VOTE: A\\n", b.VoterLabel, string(ev.Body))

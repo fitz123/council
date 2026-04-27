@@ -129,12 +129,13 @@ func TestStderrReporter_Render(t *testing.T) {
 			name: "ballot voted fresh",
 			ev: debate.StageEvent{
 				Kind: "ballot", Label: "A", RealName: "codex_expert",
-				Body:     []byte("Reasoning here.\n\nVOTE: B"),
-				VotedFor: "B",
-				Duration: 12 * time.Second,
+				Body:             []byte("Reasoning here.\n\nVOTE: B"),
+				VotedFor:         "B",
+				VotedForRealName: "haiku_expert",
+				Duration:         12 * time.Second,
 			},
 			mustContain: []string{
-				"[12:00:00] ballot A (codex_expert) voted for B in 12.0s",
+				"[12:00:00] ballot A (codex_expert) voted for B (haiku_expert) in 12.0s",
 				"=== ballot A (codex_expert) ===",
 				"Reasoning here.",
 				"VOTE: B",
@@ -145,17 +146,31 @@ func TestStderrReporter_Render(t *testing.T) {
 			name: "ballot voted resumed",
 			ev: debate.StageEvent{
 				Kind: "ballot", Label: "C", RealName: "haiku",
-				Body:     []byte("Cached ballot text\n\nVOTE: A"),
-				VotedFor: "A",
-				Resumed:  true,
+				Body:             []byte("Cached ballot text\n\nVOTE: A"),
+				VotedFor:         "A",
+				VotedForRealName: "codex_expert",
+				Resumed:          true,
 			},
 			mustContain: []string{
-				"reused from cache, voted for A",
+				"reused from cache, voted for A (codex_expert)",
 				"=== ballot C (haiku) ===",
 				"Cached ballot text",
 				"VOTE: A",
 			},
 			mustOmit: []string{"voted for A in", "discarded"},
+		},
+		{
+			name: "ballot voted fresh missing real name falls back to bare label",
+			ev: debate.StageEvent{
+				Kind: "ballot", Label: "A", RealName: "codex_expert",
+				Body:     []byte("VOTE: B"),
+				VotedFor: "B",
+				Duration: 8 * time.Second,
+			},
+			mustContain: []string{
+				"[12:00:00] ballot A (codex_expert) voted for B in 8.0s",
+			},
+			mustOmit: []string{"voted for B (", "voted for B ()"},
 		},
 		{
 			name: "ballot discarded rate-limited",
