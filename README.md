@@ -22,7 +22,7 @@ A single opinion from a single LLM is noisy. Running the same question through m
 - Voting stage: every active expert casts a ballot on the R2 aggregate; the winner's published answer is printed to stdout (clean JSON-tail extraction by default — see below — with fail-closed fallback to the raw R2 body). A tie surfaces `output-A.md`, `output-B.md`, … and exits 2 (`no_consensus`).
 - `council resume` subcommand: finish an interrupted session without re-running completed stages.
 - `verdict.json.version` bumps to `2`; shape documented in [`docs/design/v2.md`](docs/design/v2.md).
-- Published answer is a clean extraction from the winner's R2 JSON tail: every R2 ends with a fenced JSON block containing a peer-free `answer`, and that string lands in `output.md` and `verdict.answer`. Raw R2 with full peer-engaged reasoning stays in `rounds/r2/<label>.txt` unchanged. Extraction is fail-closed — missing or malformed JSON falls back to writing the raw R2 (today's pre-extraction behavior). The outcome is recorded in `verdict.json.answer_extraction`. See [ADR-0014](docs/adr/0014-json-extraction-published-answer.md).
+- Published answer is a clean extraction from the winner's R2 JSON tail: every R2 ends with a fenced JSON block containing a peer-free `answer`, and that string lands in `output.md` and `verdict.answer`. Raw R2 with full peer-engaged reasoning stays in `rounds/2/experts/<label>/output.md` unchanged. Extraction is fail-closed — missing or malformed JSON falls back to writing the raw R2 (today's pre-extraction behavior). The outcome is recorded in `verdict.json.answer_extraction`. See [ADR-0014](docs/adr/0014-json-extraction-published-answer.md).
 
 ## Web tools
 

@@ -4,7 +4,7 @@
 
 The published answer in `verdict.answer` and `output.md` currently contains debate meta-commentary referring to other experts ("Эксперт A корректно указывает...", "Эксперт B справедливо вводит развилку..."). Per ADR-0006/0008, the winner's R2 text is returned verbatim because voting replaced the judge — there is no synthesis stage.
 
-This plan introduces a **fail-closed JSON extraction** approach: every R2 response must end with a fenced JSON block containing a clean `answer` and `citations[]`. The orchestrator extracts the winner's `answer` field and writes that to `output.md` and `verdict.answer`. Raw R2 stays in `rounds/r2/<label>.txt` unchanged.
+This plan introduces a **fail-closed JSON extraction** approach: every R2 response must end with a fenced JSON block containing a clean `answer` and `citations[]`. The orchestrator extracts the winner's `answer` field and writes that to `output.md` and `verdict.answer`. Raw R2 stays in `rounds/2/experts/<label>/output.md` unchanged.
 
 When extraction fails (no JSON block, malformed JSON, missing/empty `answer`), the orchestrator falls back to writing the raw R2 — strictly today's behavior, no regression.
 
@@ -56,7 +56,7 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 - **Unit tests:** extractor parser (table-driven), SelectOutput integration (success + each fallback path), verdict-shape assertions.
 - **No e2e:** project does not have UI e2e infrastructure.
-- **Manual smoke:** run `council` against a known question after implementation; eyeball that `output.md` is clean and that `rounds/r2/<winner>.txt` still has the full debate text.
+- **Manual smoke:** run `council` against a known question after implementation; eyeball that `output.md` is clean and that `rounds/2/experts/<winner>/output.md` still has the full debate text.
 
 ## Progress Tracking
 
@@ -137,7 +137,7 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 - [x] verify all requirements from Overview are implemented:
   - Winner's clean answer becomes `verdict.answer` and `output.md` when JSON extraction succeeds.
   - Raw R2 fallback writes the same content as today on every failure path.
-  - `rounds/r2/<label>.txt` is unchanged for every expert (always full body).
+  - `rounds/2/experts/<label>/output.md` is unchanged for every expert (always full body).
   - `verdict.json.answer_extraction` records the outcome.
 - [x] verify edge cases are handled (each `ExtractStatus` value has at least one test).
 - [x] run full test suite: `go test ./...` — all green.
@@ -147,7 +147,7 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 ### Task 7: Update documentation
 
-- [x] update `README.md`: under "What's new in v2" (or wherever post-v2 changes are listed), add a one-paragraph note that the published answer is now a clean extraction from the winner's R2 JSON tail, with raw R2 preserved in `rounds/r2/`.
+- [x] update `README.md`: under "What's new in v2" (or wherever post-v2 changes are listed), add a one-paragraph note that the published answer is now a clean extraction from the winner's R2 JSON tail, with raw R2 preserved in `rounds/2/experts/<label>/output.md`.
 - [x] add ADR `docs/adr/0014-json-extraction-published-answer.md` following the existing ADR template (Status, Context, Alternatives, Decision, Consequences, Compliance, Research, Supersedes/Extends).
   - Status: Accepted (cite session 2026-04-27T21-24-13Z-pleasantly-above-maggot + issue #16).
   - Decision: JSON-tail extraction with fail-closed → raw R2 fallback.
@@ -237,7 +237,7 @@ The "No meta-commentary about the debate process itself" line stays — it now a
 
 **Manual verification:**
 - Eyeball `output.md` of 3–5 sessions to confirm it reads as a clean answer to the original question with no "Expert A/B/C" references.
-- Compare `output.md` vs. `rounds/r2/<winner>.txt` on a few sessions to confirm no information loss in the answer field.
+- Compare `output.md` vs. `rounds/2/experts/<winner>/output.md` on a few sessions to confirm no information loss in the answer field.
 
 **Follow-up work (potential, not in this plan):**
 - Apply the same extraction in the tied-candidates path (multi-winner ties) — out of scope here, separate issue.
