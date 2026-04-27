@@ -147,14 +147,14 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 ### Task 7: Update documentation
 
-- [ ] update `README.md`: under "What's new in v2" (or wherever post-v2 changes are listed), add a one-paragraph note that the published answer is now a clean extraction from the winner's R2 JSON tail, with raw R2 preserved in `rounds/r2/`.
-- [ ] add ADR `docs/adr/0014-json-extraction-published-answer.md` following the existing ADR template (Status, Context, Alternatives, Decision, Consequences, Compliance, Research, Supersedes/Extends).
+- [x] update `README.md`: under "What's new in v2" (or wherever post-v2 changes are listed), add a one-paragraph note that the published answer is now a clean extraction from the winner's R2 JSON tail, with raw R2 preserved in `rounds/r2/`.
+- [x] add ADR `docs/adr/0014-json-extraction-published-answer.md` following the existing ADR template (Status, Context, Alternatives, Decision, Consequences, Compliance, Research, Supersedes/Extends).
   - Status: Accepted (cite session 2026-04-27T21-24-13Z-pleasantly-above-maggot + issue #16).
   - Decision: JSON-tail extraction with fail-closed → raw R2 fallback.
   - Alternatives evaluated: B + validation pass (council's headline), text-marker section format, mechanical regex strip.
   - Compliance fitness function: `jq -e '.answer_extraction.status == "ok" or (.answer_extraction.status | startswith("fallback_"))' verdict.json` returns true on every session.
-- [ ] reference issue #16 and the council session in the ADR's "Research" section.
-- [ ] no `verdict.json.version` bump (additive change; consumers ignore unknown fields).
+- [x] reference issue #16 and the council session in the ADR's "Research" section.
+- [x] no `verdict.json.version` bump (additive change; consumers ignore unknown fields).
 
 *Note: ralphex automatically moves completed plans to `docs/plans/completed/`.*
 
