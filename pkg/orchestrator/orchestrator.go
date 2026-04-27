@@ -217,21 +217,19 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 	}
 
 	tally := debate.Tally(ballots, activeLabels)
-	if err := debate.SelectOutput(sess, tally, r2); err != nil {
+	outcome, err := debate.SelectOutput(sess, tally, r2)
+	if err != nil {
 		v.Status = "error"
 		return finalizeAndWrite(v, sess, startedAt, err)
 	}
 	v.Voting = buildVotingVerdict(tally)
 
-	// Unique winner: copy winner's R2 body into v.Answer so cmd/council
-	// can print it to stdout.
+	// Unique winner: mirror what SelectOutput wrote to output.md into
+	// v.Answer so cmd/council prints the same bytes to stdout. On the
+	// extraction-OK path that is the clean JSON-tail answer; on any
+	// fallback it is the raw R2 body verbatim.
 	if tally.Winner != "" {
-		for _, o := range r2 {
-			if o.Label == tally.Winner {
-				v.Answer = o.Body
-				break
-			}
-		}
+		v.Answer = outcome.Answer
 		v.Status = "ok"
 		return finalizeAndWrite(v, sess, startedAt, nil)
 	}
