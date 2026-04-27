@@ -27,17 +27,19 @@ type Reporter interface {
 	OnStageDone(StageEvent)
 }
 
-// StageEvent is the per-stage payload. Kind discriminates the two event
-// kinds ("round-expert" and "ballot"); within "round-expert", Round
-// distinguishes the round-1 and round-2 shapes. Consumers switch on Kind
-// and read only the fields relevant to that shape.
+// StageEvent is the per-stage payload. Kind discriminates the three event
+// kinds ("round-expert", "ballot", "extraction"); within "round-expert",
+// Round distinguishes the round-1 and round-2 shapes. Consumers switch on
+// Kind and read only the fields relevant to that shape.
 //
 // Body is the raw subprocess stdout (output.md or votes/<label>.txt) the
-// debate package already loaded for the forgery scan. It carries through
-// untrusted LLM bytes — consumers should pipe it through stripControlBytes
-// (or equivalent) before writing to a terminal.
+// debate package already loaded for the forgery scan. For extraction
+// events it carries the bytes that were written to output.md (the
+// extracted answer on ExtractOK; the raw R2 on any fallback). It carries
+// through untrusted LLM bytes — consumers should pipe it through
+// stripControlBytes (or equivalent) before writing to a terminal.
 type StageEvent struct {
-	// Kind is "round-expert" or "ballot".
+	// Kind is "round-expert", "ballot", or "extraction".
 	Kind string
 
 	// Round is 1 or 2 for round-expert events; 0 for ballot events.
@@ -95,6 +97,14 @@ type StageEvent struct {
 	// .done marker (D14 resume path) rather than re-spawned. Body is still
 	// populated (read from disk); Duration is zero.
 	Resumed bool
+
+	// ExtractStatus is the JSON-tail extraction outcome (ADR-0014) for
+	// Kind == "extraction" events. ExtractOK indicates the published
+	// answer in Body is the extracted JSON `answer` field; any other
+	// value indicates the caller fell back to writing the raw R2 body
+	// verbatim. Zero (ExtractOK) on non-extraction events — consumers
+	// switch on Kind first, so the alias is harmless.
+	ExtractStatus ExtractStatus
 }
 
 // NopReporter is the default when --verbose is off. Debate code can call
@@ -136,6 +146,23 @@ func reportRoundExpert(rep Reporter, round int, ex LabeledExpert, r *RoundOutput
 // against the same defensive copy used to derive `active`, so reporting
 // resolves b.VotedFor in O(1) and never reads through the unsorted shared
 // cfg.Experts slice header.
+// reportExtraction is the fire-point used by SelectOutput on the unique-
+// winner path, after output.md has been written. The renderer surfaces
+// the ExtractOK / fallback discriminator so the operator can audit the
+// JSON-tail compliance rate live, without re-reading verdict.json. Body
+// carries the bytes that landed in output.md so the renderer can report
+// "N chars" without recomputing them. The caller is expected to have
+// already normalized rep to NopReporter when --verbose is off.
+func reportExtraction(rep Reporter, label, realName string, status ExtractStatus, published string) {
+	rep.OnStageDone(StageEvent{
+		Kind:          "extraction",
+		Label:         label,
+		RealName:      realName,
+		Body:          []byte(published),
+		ExtractStatus: status,
+	})
+}
+
 func reportBallot(rep Reporter, ex LabeledExpert, realNames map[string]string, b *Ballot, body []byte, resumed bool) {
 	var votedForRealName string
 	if b.VotedFor != "" {
