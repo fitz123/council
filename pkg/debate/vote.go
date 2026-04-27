@@ -161,7 +161,7 @@ func runOneBallot(ctx context.Context, cfg BallotConfig, ex LabeledExpert, quest
 	result := Ballot{VoterLabel: ex.Label}
 	resumed := false
 	var reportBody []byte
-	defer func() { reportBallot(cfg.Reporter, ex, &result, reportBody, resumed) }()
+	defer func() { reportBallot(cfg.Reporter, ex, cfg.Experts, &result, reportBody, resumed) }()
 
 	votesDir := filepath.Join(cfg.Session.Path, "voting", "votes")
 	stdoutPath := filepath.Join(votesDir, ex.Label+".txt")

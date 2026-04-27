@@ -106,12 +106,13 @@ func (r *stderrReporter) renderBallot(e debate.StageEvent) {
 	ts := nowStamp()
 	switch {
 	case e.VotedFor != "":
+		candidate := formatCandidate(e.VotedFor, e.VotedForRealName)
 		if e.Resumed {
 			fmt.Fprintf(r.w, "[%s] ballot %s (%s) reused from cache, voted for %s\n",
-				ts, e.Label, e.RealName, e.VotedFor)
+				ts, e.Label, e.RealName, candidate)
 		} else {
 			fmt.Fprintf(r.w, "[%s] ballot %s (%s) voted for %s in %.1fs\n",
-				ts, e.Label, e.RealName, e.VotedFor, e.Duration.Seconds())
+				ts, e.Label, e.RealName, candidate, e.Duration.Seconds())
 		}
 	case e.LimitErr != nil:
 		fmt.Fprintf(r.w, "[%s] ballot %s (%s) discarded (rate-limited) in %.1fs\n",
@@ -127,6 +128,19 @@ func (r *stderrReporter) renderBallot(e debate.StageEvent) {
 	if e.VotedFor == "" {
 		fmt.Fprintln(r.w, "(no vote — discarded)")
 	}
+}
+
+// formatCandidate renders the chosen candidate as "X (realname)" so the
+// operator can read the live ballot line without cross-referencing
+// verdict.json's anonymization map. Falls back to the bare label when the
+// real name is unknown (e.g. a future code path that fires a ballot event
+// without populating VotedForRealName) so the line still parses cleanly
+// instead of rendering "X ()".
+func formatCandidate(label, realName string) string {
+	if realName == "" {
+		return label
+	}
+	return fmt.Sprintf("%s (%s)", label, realName)
 }
 
 // ballotRejectedLabel maps a debate.BallotRejected* constant to the
