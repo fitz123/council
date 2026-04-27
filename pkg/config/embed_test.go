@@ -71,6 +71,36 @@ func TestLoadFromEmbedded_ProfileShape(t *testing.T) {
 	}
 }
 
+// TestLoadFromEmbedded_PeerAwareJSONTail locks in the contract that the
+// peer-aware (R2) prompt instructs experts to (a) avoid meta-commentary in
+// the published answer, (b) end the response with a fenced JSON block
+// containing an "answer" field, and (c) make that JSON block the LAST
+// content in the response. Drift here breaks the JSON-extraction pipeline
+// in pkg/debate/extract.go.
+func TestLoadFromEmbedded_PeerAwareJSONTail(t *testing.T) {
+	p, err := loadFromEmbedded()
+	if err != nil {
+		t.Fatalf("loadFromEmbedded: %v", err)
+	}
+	body := p.Round2Prompt.Body
+
+	if !strings.Contains(body, "No meta-commentary about the\ndebate process itself.") &&
+		!strings.Contains(body, "No meta-commentary about the debate process itself.") {
+		t.Errorf("peer-aware.md missing the no-meta-commentary directive; body:\n%s", body)
+	}
+
+	if !strings.Contains(body, "```json") {
+		t.Errorf("peer-aware.md missing a fenced ```json example; body:\n%s", body)
+	}
+	if !strings.Contains(body, `"answer"`) {
+		t.Errorf("peer-aware.md missing the \"answer\" JSON key; body:\n%s", body)
+	}
+
+	if !strings.Contains(body, "LAST") {
+		t.Errorf("peer-aware.md missing the LAST-content requirement for the JSON block; body:\n%s", body)
+	}
+}
+
 // TestLoadFromEmbedded_F7EarlyUnknownField is the F7 early gate: a local
 // config with an unknown top-level field (e.g. `effort: bogus`) must be
 // rejected by Load before the orchestrator ever spawns. cmd/council maps

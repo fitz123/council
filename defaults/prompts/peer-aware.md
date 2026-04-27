@@ -34,3 +34,25 @@ Sycophancy resistance (hard rules):
 Format: 3-8 sentences of your refined answer, with inline URL citations
 where you verified (or refuted) a claim. No meta-commentary about the
 debate process itself.
+
+Output discipline:
+- Your response is in two halves separated by a blank line.
+- First half: your peer-engaged refinement above. Peer references and
+  meta-references to other experts are allowed here — voters use this
+  prose to evaluate engagement and verification.
+- Second half MUST be the LAST content in the response, after a blank
+  line: a fenced JSON code block with this exact shape:
+
+  ```json
+  {
+    "answer": "<3-8 sentence clean standalone answer to the original question; no references to peers; preserve URL citations inline>",
+    "citations": ["<url>", "<url>"]
+  }
+  ```
+
+The JSON block is what gets published as the final answer. The "no
+meta-commentary" rule applies specifically to the JSON `answer` field:
+it must read as a self-contained answer to the original question, with
+no "Expert A said…" or "as my peer noted…" phrasing. The JSON block
+must be the last content in your response — nothing after the closing
+fence.
