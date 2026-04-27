@@ -13,22 +13,45 @@ import (
 // verdict.json at session end. Field order, JSON tags, and types gate the
 // v2 schema contract in docs/design/v2.md §6 (fitness functions F3/F7/F8/F12).
 // The bytes-exact snapshot test in verdict_test.go locks this shape.
+//
+// AnswerExtraction (ADR-0014) records what SelectOutput wrote to output.md
+// on the unique-winner path: status="ok" when the JSON-tail extractor found
+// a clean answer, or status="fallback_*" when the orchestrator fell back to
+// writing the raw R2 body. Omitted on ties (no winner) and on runs where
+// SelectOutput did not run (quorum failure, injection rejection, interrupt
+// before voting). Additive field — consumers that predate ADR-0014 ignore
+// unknown keys and continue to read the published answer from
+// verdict.answer / output.md.
 type Verdict struct {
-	Version         int               `json:"version"`
-	SessionID       string            `json:"session_id"`
-	SessionPath     string            `json:"session_path"`
-	Profile         string            `json:"profile"`
-	Question        string            `json:"question"`
-	Answer          string            `json:"answer"`
-	Status          string            `json:"status"`
-	Anonymization   map[string]string `json:"anonymization,omitempty"`
-	Rounds          []Round           `json:"rounds"`
-	Experts         []ExpertSummary   `json:"experts"`
-	Voting          *VerdictVoting    `json:"voting,omitempty"`
-	RateLimits      []RateLimitEntry  `json:"rate_limits,omitempty"`
-	StartedAt       string            `json:"started_at"`
-	EndedAt         string            `json:"ended_at"`
-	DurationSeconds float64           `json:"duration_seconds"`
+	Version          int               `json:"version"`
+	SessionID        string            `json:"session_id"`
+	SessionPath      string            `json:"session_path"`
+	Profile          string            `json:"profile"`
+	Question         string            `json:"question"`
+	Answer           string            `json:"answer"`
+	Status           string            `json:"status"`
+	Anonymization    map[string]string `json:"anonymization,omitempty"`
+	Rounds           []Round           `json:"rounds"`
+	Experts          []ExpertSummary   `json:"experts"`
+	Voting           *VerdictVoting    `json:"voting,omitempty"`
+	AnswerExtraction *AnswerExtraction `json:"answer_extraction,omitempty"`
+	RateLimits       []RateLimitEntry  `json:"rate_limits,omitempty"`
+	StartedAt        string            `json:"started_at"`
+	EndedAt          string            `json:"ended_at"`
+	DurationSeconds  float64           `json:"duration_seconds"`
+}
+
+// AnswerExtraction is the per-run record of how output.md / verdict.answer
+// was produced from the winner's R2 body (ADR-0014). Status is one of
+// "ok" | "fallback_no_json" | "fallback_invalid_json" |
+// "fallback_missing_answer" | "fallback_empty_answer". WinnerLabel is the
+// anonymized single-letter token of the winning expert. The struct is
+// pointer-typed and `omitempty` on Verdict so resumed sessions that predate
+// the field — and ties / non-voting terminal paths where extraction never
+// ran — serialize cleanly with no answer_extraction key.
+type AnswerExtraction struct {
+	Status      string `json:"status"`
+	WinnerLabel string `json:"winner_label"`
 }
 
 // RateLimitEntry records one expert subprocess that returned a runner-level

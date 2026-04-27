@@ -36,6 +36,33 @@ const (
 	ExtractEmptyAnswer
 )
 
+// VerdictStatus returns the wire-format string for verdict.json's
+// answer_extraction.status field (ADR-0014). ExtractOK maps to "ok"; every
+// fail-closed value maps to "fallback_<reason>" so a single jq probe
+// (`.answer_extraction.status == "ok" or
+// (.answer_extraction.status | startswith("fallback_"))`) can verify the
+// invariant across every session.
+//
+// An unknown ExtractStatus (defensive — should never occur) maps to
+// "fallback_unknown" so the field is always serializable rather than
+// panicking on a future enum extension that forgot to update this map.
+func (s ExtractStatus) VerdictStatus() string {
+	switch s {
+	case ExtractOK:
+		return "ok"
+	case ExtractNoJSONBlock:
+		return "fallback_no_json"
+	case ExtractInvalidJSON:
+		return "fallback_invalid_json"
+	case ExtractMissingAnswer:
+		return "fallback_missing_answer"
+	case ExtractEmptyAnswer:
+		return "fallback_empty_answer"
+	default:
+		return "fallback_unknown"
+	}
+}
+
 // ExtractAnswer scans raw for the LAST fenced code block and returns the
 // value of its top-level `answer` field. Pure function: no logging, no
 // errors. Callers inspect the returned status and fall back to writing

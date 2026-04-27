@@ -211,3 +211,29 @@ func TestExtractAnswer(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractStatus_VerdictStatus pins the wire-format strings the
+// orchestrator writes into verdict.json's answer_extraction.status field
+// (ADR-0014). Every ExtractStatus value must map to a stable, jq-probable
+// string ("ok" or "fallback_*"); a defensive default catches future enum
+// extensions that forget to update the table.
+func TestExtractStatus_VerdictStatus(t *testing.T) {
+	cases := []struct {
+		status ExtractStatus
+		want   string
+	}{
+		{status: ExtractOK, want: "ok"},
+		{status: ExtractNoJSONBlock, want: "fallback_no_json"},
+		{status: ExtractInvalidJSON, want: "fallback_invalid_json"},
+		{status: ExtractMissingAnswer, want: "fallback_missing_answer"},
+		{status: ExtractEmptyAnswer, want: "fallback_empty_answer"},
+		{status: ExtractStatus(99), want: "fallback_unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			if got := tc.status.VerdictStatus(); got != tc.want {
+				t.Errorf("(%v).VerdictStatus() = %q, want %q", tc.status, got, tc.want)
+			}
+		})
+	}
+}
