@@ -74,11 +74,11 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 ### Task 1: Update peer-aware.md prompt to require trailing JSON block
 
-- [ ] read `defaults/prompts/peer-aware.md` and identify the format-rules section (currently lines 34–36).
-- [ ] append a new section instructing the expert to end the response with a fenced JSON code block: `{"answer": "<3–8 sentence clean standalone answer; no peer references; preserve URL citations inline>", "citations": ["<url>", ...]}`. Keep the existing "no meta-commentary" line — they reinforce each other.
-- [ ] explicitly state that the JSON block must be the LAST content in the response, separated from the prose by a blank line, and that prose with peer references is allowed before the JSON block (the prose feeds voters; the JSON feeds the published output).
-- [ ] write a unit test that loads the prompt file and asserts both (a) the no-meta-commentary line still exists, (b) a fenced JSON example with `"answer"` key is present, (c) the prompt mentions the LAST-content requirement.
-- [ ] run `go test ./pkg/config/...` — must pass before task 2.
+- [x] read `defaults/prompts/peer-aware.md` and identify the format-rules section (currently lines 34–36).
+- [x] append a new section instructing the expert to end the response with a fenced JSON code block: `{"answer": "<3–8 sentence clean standalone answer; no peer references; preserve URL citations inline>", "citations": ["<url>", ...]}`. Keep the existing "no meta-commentary" line — they reinforce each other.
+- [x] explicitly state that the JSON block must be the LAST content in the response, separated from the prose by a blank line, and that prose with peer references is allowed before the JSON block (the prose feeds voters; the JSON feeds the published output).
+- [x] write a unit test that loads the prompt file and asserts both (a) the no-meta-commentary line still exists, (b) a fenced JSON example with `"answer"` key is present, (c) the prompt mentions the LAST-content requirement.
+- [x] run `go test ./pkg/config/...` — must pass before task 2.
 
 ### Task 2: Implement JSON extractor in pkg/debate/extract.go
 
