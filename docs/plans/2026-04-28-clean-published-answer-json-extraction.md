@@ -82,13 +82,13 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 ### Task 2: Implement JSON extractor in pkg/debate/extract.go
 
-- [ ] create new file `pkg/debate/extract.go` with `ExtractAnswer(raw string) (answer string, status ExtractStatus)`.
-- [ ] define `ExtractStatus` enum: `ExtractOK`, `ExtractNoJSONBlock`, `ExtractInvalidJSON`, `ExtractMissingAnswer`, `ExtractEmptyAnswer`.
-- [ ] parse strategy: scan for the LAST fenced code block (` ```json ... ``` ` or generic ` ``` ... ``` ` whose content begins with `{`); decode with `encoding/json`; require `answer` to be a non-empty string after trimming whitespace.
-- [ ] do NOT validate the `citations` field — defensive parsing only on `answer`. Citations are operator-level metadata; ignore.
-- [ ] when status is anything other than `ExtractOK`, the returned `answer` is the empty string.
-- [ ] no logging, no errors — pure function returning (string, status).
-- [ ] write `pkg/debate/extract_test.go` with table-driven cases:
+- [x] create new file `pkg/debate/extract.go` with `ExtractAnswer(raw string) (answer string, status ExtractStatus)`.
+- [x] define `ExtractStatus` enum: `ExtractOK`, `ExtractNoJSONBlock`, `ExtractInvalidJSON`, `ExtractMissingAnswer`, `ExtractEmptyAnswer`.
+- [x] parse strategy: scan for the LAST fenced code block (` ```json ... ``` ` or generic ` ``` ... ``` ` whose content begins with `{`); decode with `encoding/json`; require `answer` to be a non-empty string after trimming whitespace.
+- [x] do NOT validate the `citations` field — defensive parsing only on `answer`. Citations are operator-level metadata; ignore.
+- [x] when status is anything other than `ExtractOK`, the returned `answer` is the empty string.
+- [x] no logging, no errors — pure function returning (string, status).
+- [x] write `pkg/debate/extract_test.go` with table-driven cases:
   - happy path: simple JSON block with `answer` → returns text + OK.
   - happy path: JSON block with `answer` and `citations[]` → ignores citations, returns answer + OK.
   - JSON block with leading/trailing whitespace in `answer` → trims, returns OK.
@@ -101,7 +101,7 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
   - JSON with `answer: null` → `ExtractMissingAnswer` (null treated as missing).
   - JSON with `answer` as a number/array/object → `ExtractMissingAnswer` (require string type).
   - prose containing the literal text "```json" inside a quoted block but no real fence → `ExtractNoJSONBlock`.
-- [ ] run `go test ./pkg/debate/ -run TestExtract` — must pass before task 3.
+- [x] run `go test ./pkg/debate/ -run TestExtract` — must pass before task 3.
 
 ### Task 3: Wire extractor into SelectOutput
 
