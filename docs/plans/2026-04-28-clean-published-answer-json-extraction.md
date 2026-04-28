@@ -115,12 +115,12 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 ### Task 4: Record extraction outcome in verdict.json
 
-- [ ] in `pkg/session/verdict.go`, add a top-level field `AnswerExtraction` (struct) to the verdict shape: `{ "status": "ok" | "fallback_no_json" | "fallback_invalid_json" | "fallback_missing_answer" | "fallback_empty_answer", "winner_label": "B" }`. Use `omitempty` on the struct so resumed sessions that predate this field still serialize cleanly.
-- [ ] update `pkg/session/verdict_test.go` canonical fixture (`testdata/verdict_canonical.json`) to include the new field on a happy-path verdict.
-- [ ] update the verdict-write call sites (orchestrator main path) to populate the field from `SelectOutput`'s returned status.
-- [ ] document the field in the verdict.json schema comment block at the top of `pkg/session/verdict.go`.
-- [ ] write tests: verdict.json contains `answer_extraction.status: "ok"` on extraction success; contains `"fallback_*"` matching the reason on each fallback path.
-- [ ] run `go test ./pkg/session/...` and `go test ./pkg/debate/...` — must pass before task 5.
+- [x] in `pkg/session/verdict.go`, add a top-level field `AnswerExtraction` (struct) to the verdict shape: `{ "status": "ok" | "fallback_no_json" | "fallback_invalid_json" | "fallback_missing_answer" | "fallback_empty_answer", "winner_label": "B" }`. Use `omitempty` on the struct so resumed sessions that predate this field still serialize cleanly.
+- [x] update `pkg/session/verdict_test.go` canonical fixture (`testdata/verdict_canonical.json`) to include the new field on a happy-path verdict.
+- [x] update the verdict-write call sites (orchestrator main path) to populate the field from `SelectOutput`'s returned status.
+- [x] document the field in the verdict.json schema comment block at the top of `pkg/session/verdict.go`.
+- [x] write tests: verdict.json contains `answer_extraction.status: "ok"` on extraction success; contains `"fallback_*"` matching the reason on each fallback path.
+- [x] run `go test ./pkg/session/...` and `go test ./pkg/debate/...` — must pass before task 5.
 
 ### Task 5: Verbose-stream event for extraction outcome
 

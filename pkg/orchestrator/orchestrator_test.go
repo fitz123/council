@@ -214,6 +214,19 @@ func TestRun_HappyPath_V2(t *testing.T) {
 	if got := len(v.Anonymization); got != 3 {
 		t.Errorf("anonymization size = %d, want 3", got)
 	}
+	// AnswerExtraction (ADR-0014) reports the unique-winner outcome. The
+	// stub body has no JSON tail so the orchestrator must record a
+	// fallback status alongside the winning label — never nil on a
+	// unique-winner verdict.
+	if v.AnswerExtraction == nil {
+		t.Fatal("AnswerExtraction nil on unique-winner verdict")
+	}
+	if v.AnswerExtraction.Status != "fallback_no_json" {
+		t.Errorf("AnswerExtraction.Status = %q, want fallback_no_json (raw stub body has no JSON tail)", v.AnswerExtraction.Status)
+	}
+	if v.AnswerExtraction.WinnerLabel != "A" {
+		t.Errorf("AnswerExtraction.WinnerLabel = %q, want A", v.AnswerExtraction.WinnerLabel)
+	}
 }
 
 // TestRun_R1Drop_V2 — one expert fails R1. Quorum=1 still met so the run
@@ -345,6 +358,81 @@ func TestRun_TieNoConsensus_V2(t *testing.T) {
 	// must not pick it up.
 	if _, err := os.Stat(filepath.Join(s.Path, ".done")); err != nil {
 		t.Errorf("root .done missing on tie: %v", err)
+	}
+	// AnswerExtraction is unique-winner-only (ADR-0014); ties leave it
+	// nil so the verdict.json key is omitted via `omitempty`.
+	if v.AnswerExtraction != nil {
+		t.Errorf("AnswerExtraction = %+v, want nil on tie (no extraction performed)", v.AnswerExtraction)
+	}
+}
+
+// TestRun_AnswerExtraction_OK drives a winner whose R2 ends with a
+// JSON-tail block carrying a clean answer. Run must publish that extracted
+// answer (not the raw R2) into v.Answer + output.md and record
+// v.AnswerExtraction.Status == "ok" so the operator-facing audit field
+// matches the bytes on disk (ADR-0014).
+func TestRun_AnswerExtraction_OK(t *testing.T) {
+	const cleanAnswer = "Use Raft. It is simpler and well-documented."
+	const r2Body = "Эксперт A корректно указывает на сложность Paxos.\n\n" +
+		"```json\n" +
+		`{"answer": "Use Raft. It is simpler and well-documented."}` + "\n" +
+		"```\n"
+	stub := &stubExec{
+		name: "stub",
+		on: func(ctx context.Context, n int64, req executor.Request) (executor.Response, error) {
+			stage, label := classifyRequest(req)
+			switch stage {
+			case stageBallot:
+				return writeOK("VOTE: A\n")(ctx, n, req)
+			case stageR1:
+				return writeOK("body-"+label)(ctx, n, req)
+			case stageR2:
+				return writeOK(r2Body)(ctx, n, req)
+			}
+			t.Errorf("unclassified stub call: %s", req.StdoutFile)
+			return executor.Response{}, errors.New("unclassified")
+		},
+	}
+	register(t, stub)
+
+	p := newV2TestProfile("stub", []string{"e1", "e2", "e3"})
+	s := newV2Session(t, p, "Raft or Paxos?")
+
+	v, err := Run(context.Background(), p, "Raft or Paxos?", s, debate.NopReporter{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if v.Status != "ok" {
+		t.Fatalf("status = %q, want ok", v.Status)
+	}
+	if v.AnswerExtraction == nil {
+		t.Fatal("AnswerExtraction nil, want populated")
+	}
+	if v.AnswerExtraction.Status != "ok" {
+		t.Errorf("AnswerExtraction.Status = %q, want ok", v.AnswerExtraction.Status)
+	}
+	if v.AnswerExtraction.WinnerLabel != "A" {
+		t.Errorf("AnswerExtraction.WinnerLabel = %q, want A", v.AnswerExtraction.WinnerLabel)
+	}
+	want := cleanAnswer + "\n"
+	if v.Answer != want {
+		t.Errorf("v.Answer = %q, want %q (extracted JSON tail, not raw R2)", v.Answer, want)
+	}
+	out, err := os.ReadFile(filepath.Join(s.Path, "output.md"))
+	if err != nil {
+		t.Fatalf("read output.md: %v", err)
+	}
+	if string(out) != want {
+		t.Errorf("output.md = %q, want %q", out, want)
+	}
+	// Raw R2 stays under rounds/2/experts/A/output.md verbatim — extraction
+	// must never touch the audit record.
+	rawR2, err := os.ReadFile(filepath.Join(s.Path, "rounds", "2", "experts", "A", "output.md"))
+	if err != nil {
+		t.Fatalf("read rounds/2 output.md: %v", err)
+	}
+	if string(rawR2) != r2Body {
+		t.Errorf("rounds/2 R2 body mutated: got %q, want %q", rawR2, r2Body)
 	}
 }
 

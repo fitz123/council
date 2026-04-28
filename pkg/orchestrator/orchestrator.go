@@ -227,9 +227,15 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 	// Unique winner: mirror what SelectOutput wrote to output.md into
 	// v.Answer so cmd/council prints the same bytes to stdout. On the
 	// extraction-OK path that is the clean JSON-tail answer; on any
-	// fallback it is the raw R2 body verbatim.
+	// fallback it is the raw R2 body verbatim. AnswerExtraction (ADR-0014)
+	// records which path was taken so an operator can audit parse-success
+	// rates across sessions without re-reading every R2 body.
 	if tally.Winner != "" {
 		v.Answer = outcome.Answer
+		v.AnswerExtraction = &session.AnswerExtraction{
+			Status:      outcome.Status.VerdictStatus(),
+			WinnerLabel: outcome.WinnerLabel,
+		}
 		v.Status = "ok"
 		return finalizeAndWrite(v, sess, startedAt, nil)
 	}

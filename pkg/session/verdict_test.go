@@ -60,6 +60,10 @@ func canonicalVerdict() *Verdict {
 				{VoterLabel: "C", VotedFor: "C"},
 			},
 		},
+		AnswerExtraction: &AnswerExtraction{
+			Status:      "ok",
+			WinnerLabel: "A",
+		},
 		StartedAt:       "2026-04-22T10:14:30Z",
 		EndedAt:         "2026-04-22T10:15:28Z",
 		DurationSeconds: 58.2,
@@ -325,6 +329,67 @@ func TestVerdict_RateLimitsRoundTrip(t *testing.T) {
 	}
 	if first["executor"] != "codex" {
 		t.Errorf("rate_limits[0].executor = %v, want codex", first["executor"])
+	}
+}
+
+// TestVerdict_AnswerExtractionOmittedWhenNil pins the omitempty contract
+// on AnswerExtraction so resumed sessions that predate ADR-0014 — and ties
+// / non-voting terminal paths where SelectOutput never ran — serialize
+// without the answer_extraction key. The canonical fixture sets it; this
+// test takes a copy with the pointer cleared to assert the JSON key
+// disappears.
+func TestVerdict_AnswerExtractionOmittedWhenNil(t *testing.T) {
+	v := canonicalVerdict()
+	v.AnswerExtraction = nil
+	buf, err := marshalVerdict(v)
+	if err != nil {
+		t.Fatalf("marshalVerdict: %v", err)
+	}
+	if strings.Contains(string(buf), "answer_extraction") {
+		t.Errorf("answer_extraction key present when AnswerExtraction is nil:\n%s", buf)
+	}
+}
+
+// TestVerdict_AnswerExtractionWireShape pins the wire shape of every
+// AnswerExtraction status the orchestrator can produce. verdict.json must
+// carry status="ok" on extraction success and "fallback_<reason>" on every
+// fail-closed path so the ADR-0014 fitness probe (`.answer_extraction.status
+// == "ok" or (.answer_extraction.status | startswith("fallback_"))`) holds
+// across every session. winner_label is always present alongside.
+func TestVerdict_AnswerExtractionWireShape(t *testing.T) {
+	cases := []struct {
+		name   string
+		status string
+	}{
+		{name: "ok", status: "ok"},
+		{name: "fallback_no_json", status: "fallback_no_json"},
+		{name: "fallback_invalid_json", status: "fallback_invalid_json"},
+		{name: "fallback_missing_answer", status: "fallback_missing_answer"},
+		{name: "fallback_empty_answer", status: "fallback_empty_answer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := canonicalVerdict()
+			v.AnswerExtraction = &AnswerExtraction{Status: tc.status, WinnerLabel: "B"}
+			buf, err := marshalVerdict(v)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var generic map[string]any
+			if err := json.Unmarshal(buf, &generic); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			ae, ok := generic["answer_extraction"].(map[string]any)
+			if !ok {
+				t.Fatalf("answer_extraction missing or not an object; got %T", generic["answer_extraction"])
+			}
+			if got := ae["status"]; got != tc.status {
+				t.Errorf("status = %v, want %q", got, tc.status)
+			}
+			if got := ae["winner_label"]; got != "B" {
+				t.Errorf("winner_label = %v, want B", got)
+			}
+		})
 	}
 }
 
