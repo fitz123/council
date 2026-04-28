@@ -9,7 +9,7 @@
 
 ADR-0006 (as reshaped by ADR-0008) removed the judge: voting picks a winner, and the winner's R2 body is the published answer verbatim. R2 is peer-aware — every expert reads every other expert's R1 and is instructed to engage with it. The result: clean reasoning, but the published answer often carries debate meta-commentary referring to other experts ("Эксперт A корректно указывает...", "Эксперт B справедливо вводит развилку..."). This is correct *for voters* (they need the engagement to evaluate the answer) and wrong *for the published artifact* (a reader of `output.md` did not see Experts A/B/C and has no referent for those names).
 
-The orchestrator already preserves both halves of the artifact: every R2 body lands verbatim in `rounds/r2/<label>.txt`. What's missing is a clean, peer-free version for `output.md` and `verdict.answer`.
+The orchestrator already preserves both halves of the artifact: every R2 body lands verbatim in `rounds/2/experts/<label>/output.md`. What's missing is a clean, peer-free version for the session-root `output.md` and `verdict.answer`.
 
 ## Decision
 
@@ -22,7 +22,7 @@ Every R2 response must end with a fenced JSON code block carrying a clean `answe
 }
 ```
 
-The orchestrator extracts the winner's `answer` field and writes it to `output.md` and `verdict.answer`. Raw R2 stays in `rounds/r2/<label>.txt` unchanged.
+The orchestrator extracts the winner's `answer` field and writes it to `output.md` and `verdict.answer`. Raw R2 stays in `rounds/2/experts/<label>/output.md` unchanged.
 
 **Fail-closed:** if the JSON block is missing, malformed, lacks the `answer` key, or `answer` is empty/non-string, fall back to writing the raw R2 body. The fallback path is exactly today's behavior — there is no regression risk versus the pre-extraction baseline.
 
@@ -45,7 +45,7 @@ The verbose stream emits a one-line event per session: either `extracted clean a
 ## Consequences
 
 - `output.md` and `verdict.answer` become clean, peer-free prose on the happy path.
-- `rounds/r2/<label>.txt` is unchanged — full R2 with engagement reasoning is preserved for audit.
+- `rounds/2/experts/<label>/output.md` is unchanged — full R2 with engagement reasoning is preserved for audit.
 - Worst case (every fallback path) is exactly today's behavior: raw R2 published.
 - The R2 prompt becomes more demanding (the council's "instruction overflow" critique partially applies). Fail-closed → raw R2 mitigates the downside.
 - One additive field in `verdict.json`. No `version` bump (consumers ignore unknown fields).
@@ -56,7 +56,7 @@ The verbose stream emits a one-line event per session: either `extracted clean a
 | # | Fitness | Concrete check |
 |---|---------|----------------|
 | F36 | Extraction outcome recorded on every session that runs `SelectOutput` | `jq -e '.answer_extraction.status == "ok" or (.answer_extraction.status \| startswith("fallback_"))' verdict.json` returns true |
-| F37 | Raw R2 preserved regardless of extraction outcome | `rounds/r2/<winner>.txt` byte-for-byte equals the winner subprocess body, even when `output.md` is the extracted answer |
+| F37 | Raw R2 preserved regardless of extraction outcome | `rounds/2/experts/<winner>/output.md` byte-for-byte equals the winner subprocess body, even when the session-root `output.md` is the extracted answer |
 | F38 | Fail-closed on malformed JSON | Hand-crafted R2 with malformed JSON tail → `output.md` contains the raw R2; `answer_extraction.status == "fallback_invalid_json"`; no panic |
 | F39 | Fenced-block requirement enforced | R2 ending in raw `{...}` without code fence → `ExtractNoJSONBlock`; raw R2 published |
 | F40 | Last fenced block wins | R2 with two `json` fences → extracts the last; voters' candidates unaffected |

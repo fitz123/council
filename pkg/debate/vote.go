@@ -368,8 +368,8 @@ type ExtractionOutcome struct {
 //  3. on a tie, copies each tied candidate's R2 body verbatim to
 //     output-<label>.md. Extraction is unique-winner-only.
 //
-// rounds/r2/<label>.txt is never touched: that file is the verbatim audit
-// record of what the expert produced.
+// rounds/2/experts/<label>/output.md is never touched: that file is the
+// verbatim audit record of what the expert produced.
 //
 // reporter receives one OnStageDone call with Kind == "extraction" on the
 // unique-winner path AFTER output.md has been written, so the live
