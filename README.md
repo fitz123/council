@@ -22,6 +22,7 @@ A single opinion from a single LLM is noisy. Running the same question through m
 - Voting stage: every active expert casts a ballot on the R2 aggregate; winner's R2 body is printed verbatim. A tie surfaces `output-A.md`, `output-B.md`, … and exits 2 (`no_consensus`).
 - `council resume` subcommand: finish an interrupted session without re-running completed stages.
 - `verdict.json.version` bumps to `2`; shape documented in [`docs/design/v2.md`](docs/design/v2.md).
+- Published answer is a clean extraction from the winner's R2 JSON tail: every R2 ends with a fenced JSON block containing a peer-free `answer`, and that string lands in `output.md` and `verdict.answer`. Raw R2 with full peer-engaged reasoning stays in `rounds/r2/<label>.txt` unchanged. Extraction is fail-closed — missing or malformed JSON falls back to writing the raw R2 (today's pre-extraction behavior). The outcome is recorded in `verdict.json.answer_extraction`. See [ADR-0014](docs/adr/0014-json-extraction-published-answer.md).
 
 ## Web tools
 
@@ -232,7 +233,7 @@ A `council gc` subcommand is on the roadmap.
 - [`docs/design/v2-web-tools.md`](docs/design/v2-web-tools.md) — web-tools supplement (R1/R2 tools, token + latency envelope, audit recipe).
 - [`docs/design/v3-multi-cli.md`](docs/design/v3-multi-cli.md) — multi-CLI supplement (codex + gemini executors, `council init`, exit code 6, rate-limit policy).
 - [`docs/design/v1.md`](docs/design/v1.md) — MVP spec (superseded by v2 for the run loop; still useful for file-artifact and CLI-shape invariants).
-- [`docs/adr/`](docs/adr/) — architectural decision records (0008 for debate rounds + injection, 0010 for expert web tools, 0011 for nonce-every-fence, 0012 for multi-CLI executors, 0013 for runner-side rate-limit retry removal).
+- [`docs/adr/`](docs/adr/) — architectural decision records (0008 for debate rounds + injection, 0010 for expert web tools, 0011 for nonce-every-fence, 0012 for multi-CLI executors, 0013 for runner-side rate-limit retry removal, 0014 for JSON-tail extraction of the published answer).
 - [`docs/architect-review.md`](docs/architect-review.md) — systems-architect methodology review of the spec.
 
 ## License
