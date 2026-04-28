@@ -63,20 +63,52 @@ func (s ExtractStatus) VerdictStatus() string {
 	}
 }
 
-// ExtractAnswer scans raw for the LAST fenced code block and returns the
-// value of its top-level `answer` field. Pure function: no logging, no
-// errors. Callers inspect the returned status and fall back to writing
-// the raw R2 body whenever status != ExtractOK.
+// ExtractAnswer scans raw for a fenced JSON-candidate block at the very
+// tail of the response and returns the value of its top-level `answer`
+// field. Pure function: no logging, no errors. Callers inspect the
+// returned status and fall back to writing the raw R2 body whenever
+// status != ExtractOK.
+//
+// A JSON-candidate block is either an explicitly tagged ```json fence,
+// or an untagged ``` fence whose trimmed body begins with `{`. Earlier
+// JSON blocks in the response are NOT considered: peer-aware.md
+// requires the JSON block to be the last content (nothing after the
+// closing fence). If the LAST fenced block is a non-JSON language
+// (```bash, ```python, ...), or if any non-whitespace content follows
+// the closing fence, the result is ExtractNoJSONBlock — accurately
+// attributing the absence of a JSON tail rather than silently
+// publishing a stale draft from earlier in the body.
 //
 // The scan requires explicit code fences. Bare `{...}` at the end of
 // prose is rejected (ExtractNoJSONBlock) so unstructured trailing JSON
 // in a peer's argument cannot be mistaken for the published answer.
 func ExtractAnswer(raw string) (answer string, status ExtractStatus) {
-	blocks := findFencedBlocks(raw)
+	lines := splitLines(raw)
+	blocks := findFencedBlocks(lines)
 	if len(blocks) == 0 {
 		return "", ExtractNoJSONBlock
 	}
-	body := strings.TrimSpace(blocks[len(blocks)-1])
+	last := blocks[len(blocks)-1]
+	// Tail enforcement: the JSON block must be the LAST content. Any
+	// non-whitespace line after the closing fence disqualifies the
+	// block — we won't extract a stale draft followed by prose or by
+	// another (non-JSON) code fence.
+	for _, line := range lines[last.closeIdx+1:] {
+		if strings.TrimSpace(line) != "" {
+			return "", ExtractNoJSONBlock
+		}
+	}
+	body := strings.TrimSpace(last.body)
+	switch last.lang {
+	case "json":
+		// candidate
+	case "":
+		if !strings.HasPrefix(body, "{") {
+			return "", ExtractNoJSONBlock
+		}
+	default:
+		return "", ExtractNoJSONBlock
+	}
 
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
@@ -97,32 +129,56 @@ func ExtractAnswer(raw string) (answer string, status ExtractStatus) {
 	return s, ExtractOK
 }
 
-// findFencedBlocks returns the bodies of all fenced code blocks in raw,
-// in document order. A fence is three backticks at the start of a line
-// (optionally with an info-string like `json`), and the closing fence is
-// three backticks at the start of a line. The fence-open line and the
-// fence-close line are excluded from the body.
+// fencedBlock holds one fenced code block: its info-string (language
+// tag, e.g. "json", "bash", or "" for an untagged fence), the raw body
+// between the open and close fences, and the index of the closing
+// fence line in the source `lines` slice (used by the tail-enforcement
+// check above).
+type fencedBlock struct {
+	lang     string
+	body     string
+	closeIdx int
+}
+
+// splitLines splits raw on "\n" and trims trailing "\r" from each line
+// so CRLF inputs behave the same as LF.
+func splitLines(raw string) []string {
+	lines := strings.Split(raw, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], "\r")
+	}
+	return lines
+}
+
+// findFencedBlocks returns all fenced code blocks in lines, in document
+// order. A fence is three backticks at the start of a line (optionally
+// with an info-string like `json`), and the closing fence is three
+// backticks at the start of a line. The fence-open line and the
+// fence-close line are excluded from the body; the close-line index is
+// preserved so callers can verify what (if anything) follows it.
 //
 // Implemented by hand instead of regexp so the line-anchoring is precise
 // across CRLF and trailing-whitespace edge cases. Backticks appearing
 // mid-line (e.g. inside a quoted string) are correctly ignored — they
 // never start with column 0 of a line, so they cannot match a fence.
-func findFencedBlocks(raw string) []string {
-	var blocks []string
-	lines := strings.Split(raw, "\n")
+func findFencedBlocks(lines []string) []fencedBlock {
+	var blocks []fencedBlock
 	i := 0
 	for i < len(lines) {
-		line := strings.TrimRight(lines[i], "\r")
-		if !isFenceOpen(line) {
+		lang, ok := fenceOpenLang(lines[i])
+		if !ok {
 			i++
 			continue
 		}
 		start := i + 1
 		j := start
 		for j < len(lines) {
-			inner := strings.TrimRight(lines[j], "\r")
-			if inner == "```" {
-				blocks = append(blocks, strings.Join(lines[start:j], "\n"))
+			if lines[j] == "```" {
+				blocks = append(blocks, fencedBlock{
+					lang:     lang,
+					body:     strings.Join(lines[start:j], "\n"),
+					closeIdx: j,
+				})
 				i = j + 1
 				break
 			}
@@ -136,14 +192,16 @@ func findFencedBlocks(raw string) []string {
 	return blocks
 }
 
-// isFenceOpen reports whether line is an opening fence: exactly three
-// backticks optionally followed by an info-string of [a-zA-Z0-9_-]
-// characters and nothing else. The strict info-string charset rejects
-// unusual variants ("``` json", trailing spaces) so the parser's notion
-// of a fence matches what conventional markdown renderers consider one.
-func isFenceOpen(line string) bool {
+// fenceOpenLang reports whether line is an opening fence and, if so,
+// returns its info-string (the optional language tag, e.g. "json", or
+// "" for an untagged fence). A valid opener is exactly three backticks
+// optionally followed by an info-string of [a-zA-Z0-9_-] characters and
+// nothing else. The strict info-string charset rejects unusual variants
+// ("``` json", trailing spaces) so the parser's notion of a fence
+// matches what conventional markdown renderers consider one.
+func fenceOpenLang(line string) (string, bool) {
 	if !strings.HasPrefix(line, "```") {
-		return false
+		return "", false
 	}
 	rest := line[3:]
 	for _, r := range rest {
@@ -153,8 +211,8 @@ func isFenceOpen(line string) bool {
 		case r >= '0' && r <= '9':
 		case r == '_' || r == '-':
 		default:
-			return false
+			return "", false
 		}
 	}
-	return true
+	return rest, true
 }

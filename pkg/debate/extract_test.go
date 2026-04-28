@@ -197,6 +197,86 @@ func TestExtractAnswer(t *testing.T) {
 			wantStatus: ExtractOK,
 			wantAnswer: "second",
 		},
+		{
+			// Regression: a winner whose only fenced block is a non-JSON
+			// language (here ```bash) must report fallback_no_json so the
+			// parse-success telemetry is not corrupted by classifying
+			// "no JSON tail at all" as "JSON tail that failed to parse".
+			name: "non-json language fence and nothing else: fallback_no_json",
+			raw: "prose discussing the answer.\n\n" +
+				"```bash\n" +
+				`echo "hello"` + "\n" +
+				"```\n",
+			wantStatus: ExtractNoJSONBlock,
+			wantAnswer: "",
+		},
+		{
+			// A non-JSON language block followed later by a real JSON
+			// block must still extract — filtering must not skip the
+			// real block, only the foreign-language one.
+			name: "bash block then json block: extracts the json block",
+			raw: "```bash\n" +
+				`echo "decoy"` + "\n" +
+				"```\n\n" +
+				"```json\n" +
+				`{"answer": "real published answer"}` + "\n" +
+				"```\n",
+			wantStatus: ExtractOK,
+			wantAnswer: "real published answer",
+		},
+		{
+			// Generic fence whose body is plainly not JSON (does not
+			// start with `{`) must be treated as no candidate, not a
+			// failed JSON parse.
+			name: "untagged fence with non-json body: fallback_no_json",
+			raw: "```\n" +
+				`echo "not json"` + "\n" +
+				"```\n",
+			wantStatus: ExtractNoJSONBlock,
+			wantAnswer: "",
+		},
+		{
+			// Tail-enforcement: peer-aware.md requires the JSON block
+			// to be the last content. A draft JSON earlier in the
+			// response followed by a non-JSON code fence must NOT be
+			// extracted — that would publish stale draft text and
+			// inflate parse-success telemetry.
+			name: "json block followed by bash fence: fallback_no_json",
+			raw: "```json\n" +
+				`{"answer": "draft, not final"}` + "\n" +
+				"```\n\n" +
+				"and here is the actual final answer in shell:\n\n" +
+				"```bash\n" +
+				`echo "final"` + "\n" +
+				"```\n",
+			wantStatus: ExtractNoJSONBlock,
+			wantAnswer: "",
+		},
+		{
+			// Tail-enforcement: prose after the closing fence also
+			// disqualifies the block. The contract is "nothing after
+			// the closing fence" (peer-aware.md), not "last fenced
+			// thing wins regardless of what follows".
+			name: "json block followed by trailing prose: fallback_no_json",
+			raw: "```json\n" +
+				`{"answer": "draft, not final"}` + "\n" +
+				"```\n\n" +
+				"actually, on reflection, my real answer is different.\n",
+			wantStatus: ExtractNoJSONBlock,
+			wantAnswer: "",
+		},
+		{
+			// Trailing whitespace (blank lines, indentation) after the
+			// closing fence is fine — the prompt allows it implicitly
+			// and many CLIs tack on trailing newlines.
+			name: "json block followed only by whitespace: extracts ok",
+			raw: "prose\n\n" +
+				"```json\n" +
+				`{"answer": "trailing whitespace is fine"}` + "\n" +
+				"```\n\n   \n\t\n",
+			wantStatus: ExtractOK,
+			wantAnswer: "trailing whitespace is fine",
+		},
 	}
 
 	for _, tc := range cases {
