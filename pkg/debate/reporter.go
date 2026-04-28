@@ -137,15 +137,6 @@ func reportRoundExpert(rep Reporter, round int, ex LabeledExpert, r *RoundOutput
 	})
 }
 
-// reportBallot is the deferred fire-point used by runOneBallot. Same
-// pointer-to-result pattern as reportRoundExpert so the defer reflects the
-// final outcome (success, discarded, or rate-limited). RunBallot normalizes
-// a nil BallotConfig.Reporter to NopReporter{} before fanning out, so this
-// callee can assume rep is always non-nil. realNames is a precomputed
-// label->Role.Name map for the active cohort: built once in RunBallot
-// against the same defensive copy used to derive `active`, so reporting
-// resolves b.VotedFor in O(1) and never reads through the unsorted shared
-// cfg.Experts slice header.
 // reportExtraction is the fire-point used by SelectOutput on the unique-
 // winner path, after output.md has been written. The renderer surfaces
 // the ExtractOK / fallback discriminator so the operator can audit the
@@ -163,6 +154,15 @@ func reportExtraction(rep Reporter, label, realName string, status ExtractStatus
 	})
 }
 
+// reportBallot is the deferred fire-point used by runOneBallot. Same
+// pointer-to-result pattern as reportRoundExpert so the defer reflects the
+// final outcome (success, discarded, or rate-limited). RunBallot normalizes
+// a nil BallotConfig.Reporter to NopReporter{} before fanning out, so this
+// callee can assume rep is always non-nil. realNames is a precomputed
+// label->Role.Name map for the active cohort: built once in RunBallot
+// against the same defensive copy used to derive `active`, so reporting
+// resolves b.VotedFor in O(1) and never reads through the unsorted shared
+// cfg.Experts slice header.
 func reportBallot(rep Reporter, ex LabeledExpert, realNames map[string]string, b *Ballot, body []byte, resumed bool) {
 	var votedForRealName string
 	if b.VotedFor != "" {

@@ -19,7 +19,7 @@ A single opinion from a single LLM is noisy. Running the same question through m
 - Two-round debate (`rounds: 2`): R1 is blind (each expert answers independently), R2 is peer-aware (each expert sees every other expert's R1 output, anonymized).
 - Anonymization: experts are relabeled `A, B, C, …` derived from the session ID so the cohort is rotated per run.
 - Per-session nonce + forgery detection on LLM outputs — every structural fence the orchestrator emits carries a `[nonce-<16hex>] ===` suffix, and any matching line in a subprocess's stdout is rejected (ADR-0008 as amended by ADR-0011). Benign markdown dividers like `=== Section ===` pass the scan.
-- Voting stage: every active expert casts a ballot on the R2 aggregate; winner's R2 body is printed verbatim. A tie surfaces `output-A.md`, `output-B.md`, … and exits 2 (`no_consensus`).
+- Voting stage: every active expert casts a ballot on the R2 aggregate; the winner's published answer is printed to stdout (clean JSON-tail extraction by default — see below — with fail-closed fallback to the raw R2 body). A tie surfaces `output-A.md`, `output-B.md`, … and exits 2 (`no_consensus`).
 - `council resume` subcommand: finish an interrupted session without re-running completed stages.
 - `verdict.json.version` bumps to `2`; shape documented in [`docs/design/v2.md`](docs/design/v2.md).
 - Published answer is a clean extraction from the winner's R2 JSON tail: every R2 ends with a fenced JSON block containing a peer-free `answer`, and that string lands in `output.md` and `verdict.answer`. Raw R2 with full peer-engaged reasoning stays in `rounds/r2/<label>.txt` unchanged. Extraction is fail-closed — missing or malformed JSON falls back to writing the raw R2 (today's pre-extraction behavior). The outcome is recorded in `verdict.json.answer_extraction`. See [ADR-0014](docs/adr/0014-json-extraction-published-answer.md).
@@ -87,7 +87,7 @@ Pipe a long question via stdin (use `-` as the positional argument):
 cat question.md | council -
 ```
 
-Both forms run the question through every expert in the active profile (R1 blind → R2 peer-aware), then every surviving expert votes on the best R2 answer. The winner's R2 text is printed to stdout verbatim; on a tie, each tied expert's answer lands in `output-<label>.md` and the exit code is 2. Transcripts and artifacts always land in `./.council/sessions/<id>/`.
+Both forms run the question through every expert in the active profile (R1 blind → R2 peer-aware), then every surviving expert votes on the best R2 answer. The winner's published answer is printed to stdout — by default this is the clean JSON-tail `answer` extracted from the winner's R2 (ADR-0014); if extraction fails, the raw R2 body is printed verbatim instead. On a tie, each tied expert's answer lands in `output-<label>.md` and the exit code is 2. Transcripts and artifacts always land in `./.council/sessions/<id>/`.
 
 Resume an interrupted run:
 
@@ -191,6 +191,8 @@ Per-stage events arrive in completion order (whoever finishes first appears firs
 - `round 2 expert X (name) carried R1 body forward (R2 failed)` — R2 subprocess failed; R1 body was carried forward (variants: `R2 rate-limited: <pattern>` for vendor rate limits, `reused carried R1 body from cache` on resume).
 - `round N expert X (name) FAILED in Ts` — subprocess error after retries (variant: `FAILED in Ts: rate-limited (<pattern>)`).
 - `ballot X (name) voted for Y in Ts` / `discarded (rate-limited)` / `discarded (malformed)`.
+- `extracted clean answer from winner X (name): N chars` — JSON-tail extraction succeeded (ADR-0014); `output.md` and `verdict.answer` carry the extracted answer. Only fires on the unique-winner path.
+- `extraction fell back to raw R2 from winner X (name): <reason>` — fail-closed fallback; reason ∈ {`no JSON block`, `malformed JSON`, `answer field missing or wrong type`, `answer field empty`}. `output.md` is the raw R2 verbatim.
 
 The closing `=== verdict (winner: X — name, A/N votes) ===` block carries only the header — the answer body lives on stdout to avoid duplication when both streams render to the same terminal. On a tie, the block reads `=== verdict (no consensus — tied: A, C) ===` (no body).
 
