@@ -105,13 +105,13 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 ### Task 3: Wire extractor into SelectOutput
 
-- [ ] in `pkg/debate/vote.go`, locate the winner-write branch in `SelectOutput` (lines 381–388).
-- [ ] before writing `output.md`, call `ExtractAnswer(r.Body)`. If status is `ExtractOK`, write the extracted answer string (with a single trailing newline) to `output.md`. Otherwise, fall back to writing `r.Body` unchanged.
-- [ ] do NOT touch the tied-candidates branch — ties already surface multiple files; extraction in that branch is out of scope and can be added later if needed.
-- [ ] return the extraction status from `SelectOutput` so the caller can record it in verdict.json (or accept a callback / extend the result struct — pick whichever fits the existing signature with the smallest delta).
-- [ ] update `pkg/debate/vote_test.go` to assert: when winner R2 contains a valid JSON tail, `output.md` contains only the extracted answer (not the raw R2). When winner R2 has no JSON tail, `output.md` contains the raw R2 (existing behavior preserved).
-- [ ] add a regression test: winner R2 contains malformed JSON → `output.md` is the raw R2, no panic, status reflects the fallback reason.
-- [ ] run `go test ./pkg/debate/...` — must pass before task 4.
+- [x] in `pkg/debate/vote.go`, locate the winner-write branch in `SelectOutput` (lines 381–388).
+- [x] before writing `output.md`, call `ExtractAnswer(r.Body)`. If status is `ExtractOK`, write the extracted answer string (with a single trailing newline) to `output.md`. Otherwise, fall back to writing `r.Body` unchanged.
+- [x] do NOT touch the tied-candidates branch — ties already surface multiple files; extraction in that branch is out of scope and can be added later if needed.
+- [x] return the extraction status from `SelectOutput` so the caller can record it in verdict.json (or accept a callback / extend the result struct — pick whichever fits the existing signature with the smallest delta).
+- [x] update `pkg/debate/vote_test.go` to assert: when winner R2 contains a valid JSON tail, `output.md` contains only the extracted answer (not the raw R2). When winner R2 has no JSON tail, `output.md` contains the raw R2 (existing behavior preserved).
+- [x] add a regression test: winner R2 contains malformed JSON → `output.md` is the raw R2, no panic, status reflects the fallback reason.
+- [x] run `go test ./pkg/debate/...` — must pass before task 4.
 
 ### Task 4: Record extraction outcome in verdict.json
 
