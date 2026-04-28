@@ -129,6 +129,10 @@
       }
     ]
   },
+  "answer_extraction": {
+    "status": "ok",
+    "winner_label": "A"
+  },
   "started_at": "2026-04-22T10:14:30Z",
   "ended_at": "2026-04-22T10:15:28Z",
   "duration_seconds": 58.2

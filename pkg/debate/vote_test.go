@@ -613,8 +613,18 @@ func TestSelectOutput_UniqueWinner_CopiesToOutputMd(t *testing.T) {
 		Winner:  "B",
 		Ballots: []Ballot{{VoterLabel: "A", VotedFor: "B"}, {VoterLabel: "B", VotedFor: "B"}, {VoterLabel: "C", VotedFor: "B"}},
 	}
-	if err := SelectOutput(s, result, r2); err != nil {
+	outcome, err := SelectOutput(s, result, r2, nil)
+	if err != nil {
 		t.Fatalf("SelectOutput: %v", err)
+	}
+	if outcome.WinnerLabel != "B" {
+		t.Errorf("outcome.WinnerLabel = %q, want B", outcome.WinnerLabel)
+	}
+	if outcome.Status != ExtractNoJSONBlock {
+		t.Errorf("outcome.Status = %v, want ExtractNoJSONBlock (raw body has no JSON tail)", outcome.Status)
+	}
+	if outcome.Answer != "B final answer\n" {
+		t.Errorf("outcome.Answer = %q, want raw body", outcome.Answer)
 	}
 	body, err := os.ReadFile(filepath.Join(s.Path, "output.md"))
 	if err != nil {
@@ -676,8 +686,15 @@ func TestSelectOutput_ThreeWayTie_CopiesPerLabel(t *testing.T) {
 			{VoterLabel: "C", VotedFor: "C"},
 		},
 	}
-	if err := SelectOutput(s, result, r2); err != nil {
+	outcome, err := SelectOutput(s, result, r2, nil)
+	if err != nil {
 		t.Fatalf("SelectOutput: %v", err)
+	}
+	if outcome.WinnerLabel != "" {
+		t.Errorf("outcome.WinnerLabel = %q, want empty on tie (no extraction performed)", outcome.WinnerLabel)
+	}
+	if outcome.Answer != "" {
+		t.Errorf("outcome.Answer = %q, want empty on tie", outcome.Answer)
 	}
 	for _, l := range []string{"A", "B", "C"} {
 		body, err := os.ReadFile(filepath.Join(s.Path, "output-"+l+".md"))
@@ -711,7 +728,7 @@ func TestSelectOutput_TwoWayTie_N2(t *testing.T) {
 			{VoterLabel: "B", VotedFor: "B"},
 		},
 	}
-	if err := SelectOutput(s, result, r2); err != nil {
+	if _, err := SelectOutput(s, result, r2, nil); err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
 	for _, l := range []string{"A", "B"} {
@@ -746,7 +763,7 @@ func TestSelectOutput_Resume_TieToWinner_CleansStaleTiedOutputs(t *testing.T) {
 		Votes:  map[string]int{"A": 2, "B": 0},
 		Winner: "A",
 	}
-	if err := SelectOutput(s, result, r2); err != nil {
+	if _, err := SelectOutput(s, result, r2, nil); err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
 	body, err := os.ReadFile(filepath.Join(s.Path, "output.md"))
@@ -783,7 +800,7 @@ func TestSelectOutput_Resume_WinnerToTie_CleansStaleOutputMd(t *testing.T) {
 		Votes:          map[string]int{"A": 1, "B": 1},
 		TiedCandidates: []string{"A", "B"},
 	}
-	if err := SelectOutput(s, result, r2); err != nil {
+	if _, err := SelectOutput(s, result, r2, nil); err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(s.Path, "output.md")); !os.IsNotExist(err) {
@@ -824,7 +841,7 @@ func TestSelectOutput_Resume_TiedSetShrinks_CleansDroppedLabel(t *testing.T) {
 		Votes:          map[string]int{"A": 1, "B": 1, "C": 0},
 		TiedCandidates: []string{"A", "B"},
 	}
-	if err := SelectOutput(s, result, r2); err != nil {
+	if _, err := SelectOutput(s, result, r2, nil); err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(s.Path, "output-C.md")); !os.IsNotExist(err) {
@@ -881,14 +898,177 @@ func TestSelectOutput_MissingR2ForWinner_Error(t *testing.T) {
 		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
 	})
 	result := TallyResult{Winner: "X", Votes: map[string]int{"X": 1}}
-	if err := SelectOutput(s, result, []RoundOutput{{Label: "A"}}); err == nil {
+	if _, err := SelectOutput(s, result, []RoundOutput{{Label: "A"}}, nil); err == nil {
 		t.Fatal("expected error when winner label has no R2 output")
 	}
 }
 
 func TestSelectOutput_NilSession(t *testing.T) {
-	if err := SelectOutput(nil, TallyResult{Winner: "A"}, []RoundOutput{{Label: "A", Body: "x"}}); err == nil {
+	if _, err := SelectOutput(nil, TallyResult{Winner: "A"}, []RoundOutput{{Label: "A", Body: "x"}}, nil); err == nil {
 		t.Fatal("expected error for nil session")
+	}
+}
+
+// TestSelectOutput_UniqueWinner_ExtractsCleanAnswer covers the happy path of
+// ADR-0014: the winner's R2 body ends with a fenced JSON block carrying a
+// clean `answer`, so output.md must contain only that extracted answer (with
+// a single trailing newline) — not the prose preceding the JSON tail.
+// outcome.Status reports ExtractOK and outcome.Answer mirrors output.md so
+// the orchestrator can publish the same bytes to verdict.answer.
+func TestSelectOutput_UniqueWinner_ExtractsCleanAnswer(t *testing.T) {
+	s, _, _ := setupRoundTest(t, "1111ffff2222eeee", &testExec{
+		name: testExecName,
+		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
+	})
+	winnerBody := "Эксперт A корректно указывает X. Эксперт C справедливо вводит Y.\n" +
+		"Полный разбор с упоминанием коллег.\n\n" +
+		"```json\n" +
+		"{\"answer\": \"Clean standalone answer.\", \"citations\": [\"https://example.com\"]}\n" +
+		"```\n"
+	r2 := []RoundOutput{
+		{Label: "A", Participation: "ok", Body: "A body\n"},
+		{Label: "B", Participation: "ok", Body: winnerBody},
+		{Label: "C", Participation: "ok", Body: "C body\n"},
+	}
+	result := TallyResult{
+		Votes:  map[string]int{"A": 0, "B": 3, "C": 0},
+		Winner: "B",
+	}
+	outcome, err := SelectOutput(s, result, r2, nil)
+	if err != nil {
+		t.Fatalf("SelectOutput: %v", err)
+	}
+	if outcome.Status != ExtractOK {
+		t.Errorf("outcome.Status = %v, want ExtractOK", outcome.Status)
+	}
+	if outcome.WinnerLabel != "B" {
+		t.Errorf("outcome.WinnerLabel = %q, want B", outcome.WinnerLabel)
+	}
+	want := "Clean standalone answer.\n"
+	if outcome.Answer != want {
+		t.Errorf("outcome.Answer = %q, want %q", outcome.Answer, want)
+	}
+	body, err := os.ReadFile(filepath.Join(s.Path, "output.md"))
+	if err != nil {
+		t.Fatalf("read output.md: %v", err)
+	}
+	if string(body) != want {
+		t.Errorf("output.md = %q, want %q", body, want)
+	}
+	if strings.Contains(string(body), "Эксперт") {
+		t.Errorf("output.md still contains peer references: %q", body)
+	}
+	if strings.Contains(string(body), "```") {
+		t.Errorf("output.md still contains JSON fence: %q", body)
+	}
+}
+
+// TestSelectOutput_UniqueWinner_NoJSONTail_FallsBackToRawR2 covers the
+// fail-closed contract: a winner R2 with no fenced JSON block must fall
+// back to the raw body verbatim (today's behavior). outcome.Status carries
+// the discriminator so the orchestrator can record it in verdict.json.
+func TestSelectOutput_UniqueWinner_NoJSONTail_FallsBackToRawR2(t *testing.T) {
+	s, _, _ := setupRoundTest(t, "2222dddd3333cccc", &testExec{
+		name: testExecName,
+		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
+	})
+	winnerBody := "Body with no JSON tail at all.\n"
+	r2 := []RoundOutput{
+		{Label: "A", Participation: "ok", Body: winnerBody},
+	}
+	result := TallyResult{Votes: map[string]int{"A": 1}, Winner: "A"}
+	outcome, err := SelectOutput(s, result, r2, nil)
+	if err != nil {
+		t.Fatalf("SelectOutput: %v", err)
+	}
+	if outcome.Status != ExtractNoJSONBlock {
+		t.Errorf("outcome.Status = %v, want ExtractNoJSONBlock", outcome.Status)
+	}
+	if outcome.Answer != winnerBody {
+		t.Errorf("outcome.Answer = %q, want raw body", outcome.Answer)
+	}
+	body, err := os.ReadFile(filepath.Join(s.Path, "output.md"))
+	if err != nil {
+		t.Fatalf("read output.md: %v", err)
+	}
+	if string(body) != winnerBody {
+		t.Errorf("output.md = %q, want raw body %q", body, winnerBody)
+	}
+}
+
+// TestSelectOutput_UniqueWinner_MalformedJSON_FallsBackToRawR2 is the
+// regression test for the ADR-0014 fail-closed promise: a winner R2 that
+// emits a fenced block whose contents fail to parse as JSON must NOT panic,
+// must NOT corrupt output.md, and must publish the raw R2 body unchanged.
+// outcome.Status reflects ExtractInvalidJSON so the operator can see the
+// failure mode in verdict.json instead of silently degrading to "ok".
+func TestSelectOutput_UniqueWinner_MalformedJSON_FallsBackToRawR2(t *testing.T) {
+	s, _, _ := setupRoundTest(t, "3333bbbb4444aaaa", &testExec{
+		name: testExecName,
+		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
+	})
+	winnerBody := "Prose body.\n\n```json\n{not valid json at all\n```\n"
+	r2 := []RoundOutput{
+		{Label: "A", Participation: "ok", Body: winnerBody},
+	}
+	result := TallyResult{Votes: map[string]int{"A": 1}, Winner: "A"}
+	outcome, err := SelectOutput(s, result, r2, nil)
+	if err != nil {
+		t.Fatalf("SelectOutput: %v", err)
+	}
+	if outcome.Status != ExtractInvalidJSON {
+		t.Errorf("outcome.Status = %v, want ExtractInvalidJSON", outcome.Status)
+	}
+	if outcome.Answer != winnerBody {
+		t.Errorf("outcome.Answer = %q, want raw body", outcome.Answer)
+	}
+	body, err := os.ReadFile(filepath.Join(s.Path, "output.md"))
+	if err != nil {
+		t.Fatalf("read output.md: %v", err)
+	}
+	if string(body) != winnerBody {
+		t.Errorf("output.md = %q, want raw body %q", body, winnerBody)
+	}
+}
+
+// TestSelectOutput_Tie_NoExtractionPerformed pins that ties never run
+// extraction — outcome is the zero value (WinnerLabel empty, Status zero,
+// Answer empty) — so the orchestrator can use a non-empty WinnerLabel as
+// the "extraction happened" signal without misreading a tie's zero Status
+// as ExtractOK.
+func TestSelectOutput_Tie_NoExtractionPerformed(t *testing.T) {
+	s, _, _ := setupRoundTest(t, "4444aaaa5555bbbb", &testExec{
+		name: testExecName,
+		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
+	})
+	winnerBody := "Body.\n\n```json\n{\"answer\": \"clean\"}\n```\n"
+	r2 := []RoundOutput{
+		{Label: "A", Participation: "ok", Body: winnerBody},
+		{Label: "B", Participation: "ok", Body: winnerBody},
+	}
+	result := TallyResult{
+		Votes:          map[string]int{"A": 1, "B": 1},
+		TiedCandidates: []string{"A", "B"},
+	}
+	outcome, err := SelectOutput(s, result, r2, nil)
+	if err != nil {
+		t.Fatalf("SelectOutput: %v", err)
+	}
+	if outcome.WinnerLabel != "" {
+		t.Errorf("outcome.WinnerLabel = %q, want empty on tie", outcome.WinnerLabel)
+	}
+	if outcome.Answer != "" {
+		t.Errorf("outcome.Answer = %q, want empty on tie", outcome.Answer)
+	}
+	// Per-label files contain the verbatim raw body; extraction is unique-winner-only.
+	for _, l := range []string{"A", "B"} {
+		body, err := os.ReadFile(filepath.Join(s.Path, "output-"+l+".md"))
+		if err != nil {
+			t.Fatalf("read output-%s.md: %v", l, err)
+		}
+		if string(body) != winnerBody {
+			t.Errorf("output-%s.md = %q, want raw body verbatim", l, body)
+		}
 	}
 }
 

@@ -269,6 +269,78 @@ func TestStderrReporter_Render(t *testing.T) {
 			},
 			mustOmit: []string{"voted for", "rate-limited"},
 		},
+		{
+			name: "extraction ok",
+			ev: debate.StageEvent{
+				Kind: "extraction", Label: "B", RealName: "claude_expert",
+				Body:          []byte("Clean standalone answer.\n"),
+				ExtractStatus: debate.ExtractOK,
+			},
+			mustContain: []string{
+				"[12:00:00] extracted clean answer from winner B (claude_expert): 25 chars",
+			},
+			mustOmit: []string{"fell back", "no JSON", "malformed"},
+		},
+		{
+			name: "extraction fallback no_json",
+			ev: debate.StageEvent{
+				Kind: "extraction", Label: "A", RealName: "codex_expert",
+				Body:          []byte("raw R2 body"),
+				ExtractStatus: debate.ExtractNoJSONBlock,
+			},
+			mustContain: []string{
+				"[12:00:00] extraction fell back to raw R2 from winner A (codex_expert): no JSON block",
+			},
+			mustOmit: []string{"extracted clean", "chars"},
+		},
+		{
+			name: "extraction fallback invalid_json",
+			ev: debate.StageEvent{
+				Kind: "extraction", Label: "C", RealName: "gemini_expert",
+				Body:          []byte("raw R2 body"),
+				ExtractStatus: debate.ExtractInvalidJSON,
+			},
+			mustContain: []string{
+				"extraction fell back to raw R2 from winner C (gemini_expert): malformed JSON",
+			},
+			mustOmit: []string{"extracted clean"},
+		},
+		{
+			name: "extraction fallback missing_answer",
+			ev: debate.StageEvent{
+				Kind: "extraction", Label: "B", RealName: "haiku",
+				Body:          []byte("raw R2 body"),
+				ExtractStatus: debate.ExtractMissingAnswer,
+			},
+			mustContain: []string{
+				"extraction fell back to raw R2 from winner B (haiku): answer field missing or wrong type",
+			},
+			mustOmit: []string{"extracted clean"},
+		},
+		{
+			name: "extraction fallback empty_answer",
+			ev: debate.StageEvent{
+				Kind: "extraction", Label: "A", RealName: "codex_expert",
+				Body:          []byte("raw R2 body"),
+				ExtractStatus: debate.ExtractEmptyAnswer,
+			},
+			mustContain: []string{
+				"extraction fell back to raw R2 from winner A (codex_expert): answer field empty",
+			},
+			mustOmit: []string{"extracted clean"},
+		},
+		{
+			name: "extraction ok missing real name falls back to bare label",
+			ev: debate.StageEvent{
+				Kind: "extraction", Label: "B",
+				Body:          []byte("answer."),
+				ExtractStatus: debate.ExtractOK,
+			},
+			mustContain: []string{
+				"[12:00:00] extracted clean answer from winner B: 7 chars",
+			},
+			mustOmit: []string{"winner B (", "winner B ()"},
+		},
 	}
 
 	for _, c := range cases {

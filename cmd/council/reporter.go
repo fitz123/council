@@ -43,6 +43,8 @@ func (r *stderrReporter) OnStageDone(e debate.StageEvent) {
 		r.renderRoundExpert(e)
 	case "ballot":
 		r.renderBallot(e)
+	case "extraction":
+		r.renderExtraction(e)
 	default:
 		// StageEvent.Kind is intentionally additive — a future stage type
 		// could land in pkg/debate without the renderer growing an arm
@@ -127,6 +129,44 @@ func (r *stderrReporter) renderBallot(e debate.StageEvent) {
 	}
 	if e.VotedFor == "" {
 		fmt.Fprintln(r.w, "(no vote — discarded)")
+	}
+}
+
+// renderExtraction surfaces the JSON-tail extraction outcome (ADR-0014)
+// for the unique-winner path. On ExtractOK the live stream reports the
+// byte length of the published answer; on any fallback it reports a
+// human-readable reason so the operator can spot vendor compliance gaps
+// without re-reading verdict.json. Body carries the bytes that landed in
+// output.md, so len(e.Body) is the published-answer length on the OK
+// path and the raw-R2 length on the fallback path.
+func (r *stderrReporter) renderExtraction(e debate.StageEvent) {
+	ts := nowStamp()
+	winner := formatCandidate(e.Label, e.RealName)
+	if e.ExtractStatus == debate.ExtractOK {
+		fmt.Fprintf(r.w, "[%s] extracted clean answer from winner %s: %d chars\n",
+			ts, winner, len(e.Body))
+		return
+	}
+	fmt.Fprintf(r.w, "[%s] extraction fell back to raw R2 from winner %s: %s\n",
+		ts, winner, extractFallbackReason(e.ExtractStatus))
+}
+
+// extractFallbackReason maps an ExtractStatus to the human-readable
+// reason shown after "fell back to raw R2 ... :" in the live stream. The
+// renderer only reaches this map on a non-OK status, so ExtractOK is
+// intentionally absent — the rendering branch above handles it.
+func extractFallbackReason(s debate.ExtractStatus) string {
+	switch s {
+	case debate.ExtractNoJSONBlock:
+		return "no JSON block"
+	case debate.ExtractInvalidJSON:
+		return "malformed JSON"
+	case debate.ExtractMissingAnswer:
+		return "answer field missing or wrong type"
+	case debate.ExtractEmptyAnswer:
+		return "answer field empty"
+	default:
+		return "unknown"
 	}
 }
 

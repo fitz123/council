@@ -345,22 +345,46 @@ func Tally(ballots []Ballot, activeLabels []string) TallyResult {
 	return result
 }
 
+// ExtractionOutcome reports what SelectOutput wrote to output.md on the
+// unique-winner path. WinnerLabel is "" on ties: there is no single
+// published answer to report, and Status / Answer are zero-valued.
+//
+// On the unique-winner path, Status is the result of running ExtractAnswer
+// over the winner's R2 body, and Answer is the exact bytes written to
+// output.md — the extracted JSON-tail answer when Status == ExtractOK,
+// otherwise the raw R2 body (the fail-closed fallback per ADR-0014).
+type ExtractionOutcome struct {
+	WinnerLabel string
+	Status      ExtractStatus
+	Answer      string
+}
+
 // SelectOutput finalises the voting stage on disk:
 //  1. writes voting/tally.json (votes + ballots + winner/tied fields)
-//  2. copies the winner's R2 body to session root output.md (unique winner)
-//     OR copies each tied candidate's R2 body to output-<label>.md (tie).
+//  2. on a unique winner, runs ExtractAnswer over the winner's R2 body and
+//     writes the clean JSON-tail answer to session-root output.md; on any
+//     extraction failure, falls back to writing the raw R2 body verbatim
+//     (ADR-0014 fail-closed → today's behavior).
+//  3. on a tie, copies each tied candidate's R2 body verbatim to
+//     output-<label>.md. Extraction is unique-winner-only.
 //
-// Copying the R2 body rather than the aggregate preserves the verbatim
-// expert text per D8 ("R2 output is copied verbatim to output.md"). The
-// source of truth for each label is r2[].Body, not rounds/2/aggregate.md,
-// because carried entries hold the R1 body and the aggregate formatting
-// includes nonce fences the operator should not see.
-func SelectOutput(s *session.Session, result TallyResult, r2 []RoundOutput) error {
+// rounds/2/experts/<label>/output.md is never touched: that file is the
+// verbatim audit record of what the expert produced.
+//
+// reporter receives one OnStageDone call with Kind == "extraction" on the
+// unique-winner path AFTER output.md has been written, so the live
+// verbose stream can surface JSON-tail compliance per session. Nil is
+// normalized to NopReporter so callers that don't need streaming (most
+// tests) can pass nil.
+func SelectOutput(s *session.Session, result TallyResult, r2 []RoundOutput, reporter Reporter) (ExtractionOutcome, error) {
 	if s == nil {
-		return fmt.Errorf("SelectOutput: session required")
+		return ExtractionOutcome{}, fmt.Errorf("SelectOutput: session required")
+	}
+	if reporter == nil {
+		reporter = NopReporter{}
 	}
 	if err := writeTallyJSON(s, result); err != nil {
-		return err
+		return ExtractionOutcome{}, err
 	}
 
 	r2ByLabel := make(map[string]*RoundOutput, len(r2))
@@ -375,32 +399,44 @@ func SelectOutput(s *session.Session, result TallyResult, r2 []RoundOutput) erro
 	// every prior output*.md in the session root before writing the
 	// selected one(s) so the artifacts on disk always match tally.json.
 	if err := cleanOutputs(s); err != nil {
-		return err
+		return ExtractionOutcome{}, err
 	}
 
 	if result.Winner != "" {
 		r := r2ByLabel[result.Winner]
 		if r == nil {
-			return fmt.Errorf("SelectOutput: winner label %q has no R2 output", result.Winner)
+			return ExtractionOutcome{}, fmt.Errorf("SelectOutput: winner label %q has no R2 output", result.Winner)
+		}
+		extracted, status := ExtractAnswer(r.Body)
+		var published string
+		if status == ExtractOK {
+			// Plan §Task3: write extracted answer with a single trailing
+			// newline. ExtractAnswer trims surrounding whitespace, so we
+			// re-add exactly one \n; matches the raw-R2 path's convention
+			// of ending output.md with a newline.
+			published = extracted + "\n"
+		} else {
+			published = r.Body
 		}
 		path := filepath.Join(s.Path, "output.md")
-		if err := os.WriteFile(path, []byte(r.Body), 0o644); err != nil {
-			return fmt.Errorf("SelectOutput: write %s: %w", path, err)
+		if err := os.WriteFile(path, []byte(published), 0o644); err != nil {
+			return ExtractionOutcome{}, fmt.Errorf("SelectOutput: write %s: %w", path, err)
 		}
-		return nil
+		reportExtraction(reporter, result.Winner, r.Name, status, published)
+		return ExtractionOutcome{WinnerLabel: result.Winner, Status: status, Answer: published}, nil
 	}
 
 	for _, label := range result.TiedCandidates {
 		r := r2ByLabel[label]
 		if r == nil {
-			return fmt.Errorf("SelectOutput: tied label %q has no R2 output", label)
+			return ExtractionOutcome{}, fmt.Errorf("SelectOutput: tied label %q has no R2 output", label)
 		}
 		path := filepath.Join(s.Path, "output-"+label+".md")
 		if err := os.WriteFile(path, []byte(r.Body), 0o644); err != nil {
-			return fmt.Errorf("SelectOutput: write %s: %w", path, err)
+			return ExtractionOutcome{}, fmt.Errorf("SelectOutput: write %s: %w", path, err)
 		}
 	}
-	return nil
+	return ExtractionOutcome{}, nil
 }
 
 // cleanOutputs removes the session-root output.md and every output-*.md
