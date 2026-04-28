@@ -41,14 +41,15 @@ Output discipline:
   meta-references to other experts are allowed here — voters use this
   prose to evaluate engagement and verification.
 - Second half MUST be the LAST content in the response, after a blank
-  line: a fenced JSON code block with this exact shape:
+  line: a fenced JSON code block with this exact shape (the fence lines
+  must start at column 0; do not indent them):
 
-  ```json
-  {
-    "answer": "<3-8 sentence clean standalone answer to the original question; no references to peers; preserve URL citations inline>",
-    "citations": ["<url>", "<url>"]
-  }
-  ```
+```json
+{
+  "answer": "<3-8 sentence clean standalone answer to the original question; no references to peers; preserve URL citations inline>",
+  "citations": ["<url>", "<url>"]
+}
+```
 
 The JSON block is what gets published as the final answer. The "no
 meta-commentary" rule applies specifically to the JSON `answer` field:

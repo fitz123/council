@@ -4,7 +4,7 @@
 
 The published answer in `verdict.answer` and `output.md` currently contains debate meta-commentary referring to other experts ("Эксперт A корректно указывает...", "Эксперт B справедливо вводит развилку..."). Per ADR-0006/0008, the winner's R2 text is returned verbatim because voting replaced the judge — there is no synthesis stage.
 
-This plan introduces a **fail-closed JSON extraction** approach: every R2 response must end with a fenced JSON block containing a clean `answer` and `citations[]`. The orchestrator extracts the winner's `answer` field and writes that to `output.md` and `verdict.answer`. Raw R2 stays in `rounds/r2/<label>.txt` unchanged.
+This plan introduces a **fail-closed JSON extraction** approach: every R2 response must end with a fenced JSON block containing a clean `answer` and `citations[]`. The orchestrator extracts the winner's `answer` field and writes that to `output.md` and `verdict.answer`. Raw R2 stays in `rounds/2/experts/<label>/output.md` unchanged.
 
 When extraction fails (no JSON block, malformed JSON, missing/empty `answer`), the orchestrator falls back to writing the raw R2 — strictly today's behavior, no regression.
 
@@ -56,7 +56,7 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 - **Unit tests:** extractor parser (table-driven), SelectOutput integration (success + each fallback path), verdict-shape assertions.
 - **No e2e:** project does not have UI e2e infrastructure.
-- **Manual smoke:** run `council` against a known question after implementation; eyeball that `output.md` is clean and that `rounds/r2/<winner>.txt` still has the full debate text.
+- **Manual smoke:** run `council` against a known question after implementation; eyeball that `output.md` is clean and that `rounds/2/experts/<winner>/output.md` still has the full debate text.
 
 ## Progress Tracking
 
@@ -74,21 +74,21 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 ### Task 1: Update peer-aware.md prompt to require trailing JSON block
 
-- [ ] read `defaults/prompts/peer-aware.md` and identify the format-rules section (currently lines 34–36).
-- [ ] append a new section instructing the expert to end the response with a fenced JSON code block: `{"answer": "<3–8 sentence clean standalone answer; no peer references; preserve URL citations inline>", "citations": ["<url>", ...]}`. Keep the existing "no meta-commentary" line — they reinforce each other.
-- [ ] explicitly state that the JSON block must be the LAST content in the response, separated from the prose by a blank line, and that prose with peer references is allowed before the JSON block (the prose feeds voters; the JSON feeds the published output).
-- [ ] write a unit test that loads the prompt file and asserts both (a) the no-meta-commentary line still exists, (b) a fenced JSON example with `"answer"` key is present, (c) the prompt mentions the LAST-content requirement.
-- [ ] run `go test ./pkg/config/...` — must pass before task 2.
+- [x] read `defaults/prompts/peer-aware.md` and identify the format-rules section (currently lines 34–36).
+- [x] append a new section instructing the expert to end the response with a fenced JSON code block: `{"answer": "<3–8 sentence clean standalone answer; no peer references; preserve URL citations inline>", "citations": ["<url>", ...]}`. Keep the existing "no meta-commentary" line — they reinforce each other.
+- [x] explicitly state that the JSON block must be the LAST content in the response, separated from the prose by a blank line, and that prose with peer references is allowed before the JSON block (the prose feeds voters; the JSON feeds the published output).
+- [x] write a unit test that loads the prompt file and asserts both (a) the no-meta-commentary line still exists, (b) a fenced JSON example with `"answer"` key is present, (c) the prompt mentions the LAST-content requirement.
+- [x] run `go test ./pkg/config/...` — must pass before task 2.
 
 ### Task 2: Implement JSON extractor in pkg/debate/extract.go
 
-- [ ] create new file `pkg/debate/extract.go` with `ExtractAnswer(raw string) (answer string, status ExtractStatus)`.
-- [ ] define `ExtractStatus` enum: `ExtractOK`, `ExtractNoJSONBlock`, `ExtractInvalidJSON`, `ExtractMissingAnswer`, `ExtractEmptyAnswer`.
-- [ ] parse strategy: scan for the LAST fenced code block (` ```json ... ``` ` or generic ` ``` ... ``` ` whose content begins with `{`); decode with `encoding/json`; require `answer` to be a non-empty string after trimming whitespace.
-- [ ] do NOT validate the `citations` field — defensive parsing only on `answer`. Citations are operator-level metadata; ignore.
-- [ ] when status is anything other than `ExtractOK`, the returned `answer` is the empty string.
-- [ ] no logging, no errors — pure function returning (string, status).
-- [ ] write `pkg/debate/extract_test.go` with table-driven cases:
+- [x] create new file `pkg/debate/extract.go` with `ExtractAnswer(raw string) (answer string, status ExtractStatus)`.
+- [x] define `ExtractStatus` enum: `ExtractOK`, `ExtractNoJSONBlock`, `ExtractInvalidJSON`, `ExtractMissingAnswer`, `ExtractEmptyAnswer`.
+- [x] parse strategy: scan for the LAST fenced code block (` ```json ... ``` ` or generic ` ``` ... ``` ` whose content begins with `{`); decode with `encoding/json`; require `answer` to be a non-empty string after trimming whitespace.
+- [x] do NOT validate the `citations` field — defensive parsing only on `answer`. Citations are operator-level metadata; ignore.
+- [x] when status is anything other than `ExtractOK`, the returned `answer` is the empty string.
+- [x] no logging, no errors — pure function returning (string, status).
+- [x] write `pkg/debate/extract_test.go` with table-driven cases:
   - happy path: simple JSON block with `answer` → returns text + OK.
   - happy path: JSON block with `answer` and `citations[]` → ignores citations, returns answer + OK.
   - JSON block with leading/trailing whitespace in `answer` → trims, returns OK.
@@ -101,60 +101,60 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
   - JSON with `answer: null` → `ExtractMissingAnswer` (null treated as missing).
   - JSON with `answer` as a number/array/object → `ExtractMissingAnswer` (require string type).
   - prose containing the literal text "```json" inside a quoted block but no real fence → `ExtractNoJSONBlock`.
-- [ ] run `go test ./pkg/debate/ -run TestExtract` — must pass before task 3.
+- [x] run `go test ./pkg/debate/ -run TestExtract` — must pass before task 3.
 
 ### Task 3: Wire extractor into SelectOutput
 
-- [ ] in `pkg/debate/vote.go`, locate the winner-write branch in `SelectOutput` (lines 381–388).
-- [ ] before writing `output.md`, call `ExtractAnswer(r.Body)`. If status is `ExtractOK`, write the extracted answer string (with a single trailing newline) to `output.md`. Otherwise, fall back to writing `r.Body` unchanged.
-- [ ] do NOT touch the tied-candidates branch — ties already surface multiple files; extraction in that branch is out of scope and can be added later if needed.
-- [ ] return the extraction status from `SelectOutput` so the caller can record it in verdict.json (or accept a callback / extend the result struct — pick whichever fits the existing signature with the smallest delta).
-- [ ] update `pkg/debate/vote_test.go` to assert: when winner R2 contains a valid JSON tail, `output.md` contains only the extracted answer (not the raw R2). When winner R2 has no JSON tail, `output.md` contains the raw R2 (existing behavior preserved).
-- [ ] add a regression test: winner R2 contains malformed JSON → `output.md` is the raw R2, no panic, status reflects the fallback reason.
-- [ ] run `go test ./pkg/debate/...` — must pass before task 4.
+- [x] in `pkg/debate/vote.go`, locate the winner-write branch in `SelectOutput` (lines 381–388).
+- [x] before writing `output.md`, call `ExtractAnswer(r.Body)`. If status is `ExtractOK`, write the extracted answer string (with a single trailing newline) to `output.md`. Otherwise, fall back to writing `r.Body` unchanged.
+- [x] do NOT touch the tied-candidates branch — ties already surface multiple files; extraction in that branch is out of scope and can be added later if needed.
+- [x] return the extraction status from `SelectOutput` so the caller can record it in verdict.json (or accept a callback / extend the result struct — pick whichever fits the existing signature with the smallest delta).
+- [x] update `pkg/debate/vote_test.go` to assert: when winner R2 contains a valid JSON tail, `output.md` contains only the extracted answer (not the raw R2). When winner R2 has no JSON tail, `output.md` contains the raw R2 (existing behavior preserved).
+- [x] add a regression test: winner R2 contains malformed JSON → `output.md` is the raw R2, no panic, status reflects the fallback reason.
+- [x] run `go test ./pkg/debate/...` — must pass before task 4.
 
 ### Task 4: Record extraction outcome in verdict.json
 
-- [ ] in `pkg/session/verdict.go`, add a top-level field `AnswerExtraction` (struct) to the verdict shape: `{ "status": "ok" | "fallback_no_json" | "fallback_invalid_json" | "fallback_missing_answer" | "fallback_empty_answer", "winner_label": "B" }`. Use `omitempty` on the struct so resumed sessions that predate this field still serialize cleanly.
-- [ ] update `pkg/session/verdict_test.go` canonical fixture (`testdata/verdict_canonical.json`) to include the new field on a happy-path verdict.
-- [ ] update the verdict-write call sites (orchestrator main path) to populate the field from `SelectOutput`'s returned status.
-- [ ] document the field in the verdict.json schema comment block at the top of `pkg/session/verdict.go`.
-- [ ] write tests: verdict.json contains `answer_extraction.status: "ok"` on extraction success; contains `"fallback_*"` matching the reason on each fallback path.
-- [ ] run `go test ./pkg/session/...` and `go test ./pkg/debate/...` — must pass before task 5.
+- [x] in `pkg/session/verdict.go`, add a top-level field `AnswerExtraction` (struct) to the verdict shape: `{ "status": "ok" | "fallback_no_json" | "fallback_invalid_json" | "fallback_missing_answer" | "fallback_empty_answer", "winner_label": "B" }`. Use `omitempty` on the struct so resumed sessions that predate this field still serialize cleanly.
+- [x] update `pkg/session/verdict_test.go` canonical fixture (`testdata/verdict_canonical.json`) to include the new field on a happy-path verdict.
+- [x] update the verdict-write call sites (orchestrator main path) to populate the field from `SelectOutput`'s returned status.
+- [x] document the field in the verdict.json schema comment block at the top of `pkg/session/verdict.go`.
+- [x] write tests: verdict.json contains `answer_extraction.status: "ok"` on extraction success; contains `"fallback_*"` matching the reason on each fallback path.
+- [x] run `go test ./pkg/session/...` and `go test ./pkg/debate/...` — must pass before task 5.
 
 ### Task 5: Verbose-stream event for extraction outcome
 
-- [ ] in `pkg/debate/reporter.go` (or wherever stage events are defined), add an extraction event type carrying the winner label and the extraction status.
-- [ ] in `cmd/council/reporter.go`, add a renderer for the new event:
+- [x] in `pkg/debate/reporter.go` (or wherever stage events are defined), add an extraction event type carrying the winner label and the extraction status.
+- [x] in `cmd/council/reporter.go`, add a renderer for the new event:
   - On `ExtractOK`: `[hh:mm:ss] extracted clean answer from winner B (claude_expert): N chars`
   - On any fallback: `[hh:mm:ss] extraction fell back to raw R2 from winner B (claude_expert): <reason>`
-- [ ] emit the event from `SelectOutput` (or its caller) after the write completes.
-- [ ] write tests for `reporter_test.go` covering both lines.
-- [ ] run `go test ./...` — must pass before task 6.
+- [x] emit the event from `SelectOutput` (or its caller) after the write completes.
+- [x] write tests for `reporter_test.go` covering both lines.
+- [x] run `go test ./...` — must pass before task 6.
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented:
+- [x] verify all requirements from Overview are implemented:
   - Winner's clean answer becomes `verdict.answer` and `output.md` when JSON extraction succeeds.
   - Raw R2 fallback writes the same content as today on every failure path.
-  - `rounds/r2/<label>.txt` is unchanged for every expert (always full body).
+  - `rounds/2/experts/<label>/output.md` is unchanged for every expert (always full body).
   - `verdict.json.answer_extraction` records the outcome.
-- [ ] verify edge cases are handled (each `ExtractStatus` value has at least one test).
-- [ ] run full test suite: `go test ./...` — all green.
-- [ ] run linter: `go vet ./...` and any project-specific linter — fix any issues.
-- [ ] verify test coverage of `pkg/debate/extract.go` is >= 90% (measure with `go test -cover ./pkg/debate/`).
-- [ ] manual smoke: run `council` against a real question and confirm `output.md` no longer contains "Эксперт A/B/C" references on success path.
+- [x] verify edge cases are handled (each `ExtractStatus` value has at least one test).
+- [x] run full test suite: `go test ./...` — all green.
+- [x] run linter: `go vet ./...` and any project-specific linter — fix any issues.
+- [x] verify test coverage of `pkg/debate/extract.go` is >= 90% (measure with `go test -cover ./pkg/debate/`). Per-function coverage 100%; package overall 92.7%.
+- [x] manual smoke (skipped - not automatable): requires real council run against a live question; verified by post-completion observation period.
 
 ### Task 7: Update documentation
 
-- [ ] update `README.md`: under "What's new in v2" (or wherever post-v2 changes are listed), add a one-paragraph note that the published answer is now a clean extraction from the winner's R2 JSON tail, with raw R2 preserved in `rounds/r2/`.
-- [ ] add ADR `docs/adr/0014-json-extraction-published-answer.md` following the existing ADR template (Status, Context, Alternatives, Decision, Consequences, Compliance, Research, Supersedes/Extends).
+- [x] update `README.md`: under "What's new in v2" (or wherever post-v2 changes are listed), add a one-paragraph note that the published answer is now a clean extraction from the winner's R2 JSON tail, with raw R2 preserved in `rounds/2/experts/<label>/output.md`.
+- [x] add ADR `docs/adr/0014-json-extraction-published-answer.md` following the existing ADR template (Status, Context, Alternatives, Decision, Consequences, Compliance, Research, Supersedes/Extends).
   - Status: Accepted (cite session 2026-04-27T21-24-13Z-pleasantly-above-maggot + issue #16).
   - Decision: JSON-tail extraction with fail-closed → raw R2 fallback.
   - Alternatives evaluated: B + validation pass (council's headline), text-marker section format, mechanical regex strip.
   - Compliance fitness function: `jq -e '.answer_extraction.status == "ok" or (.answer_extraction.status | startswith("fallback_"))' verdict.json` returns true on every session.
-- [ ] reference issue #16 and the council session in the ADR's "Research" section.
-- [ ] no `verdict.json.version` bump (additive change; consumers ignore unknown fields).
+- [x] reference issue #16 and the council session in the ADR's "Research" section.
+- [x] no `verdict.json.version` bump (additive change; consumers ignore unknown fields).
 
 *Note: ralphex automatically moves completed plans to `docs/plans/completed/`.*
 
@@ -237,7 +237,7 @@ The "No meta-commentary about the debate process itself" line stays — it now a
 
 **Manual verification:**
 - Eyeball `output.md` of 3–5 sessions to confirm it reads as a clean answer to the original question with no "Expert A/B/C" references.
-- Compare `output.md` vs. `rounds/r2/<winner>.txt` on a few sessions to confirm no information loss in the answer field.
+- Compare `output.md` vs. `rounds/2/experts/<winner>/output.md` on a few sessions to confirm no information loss in the answer field.
 
 **Follow-up work (potential, not in this plan):**
 - Apply the same extraction in the tied-candidates path (multi-winner ties) — out of scope here, separate issue.

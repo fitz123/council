@@ -173,7 +173,7 @@ func findFencedBlocks(lines []string) []fencedBlock {
 		start := i + 1
 		j := start
 		for j < len(lines) {
-			if lines[j] == "```" {
+			if strings.TrimSpace(lines[j]) == "```" {
 				blocks = append(blocks, fencedBlock{
 					lang:     lang,
 					body:     strings.Join(lines[start:j], "\n"),
@@ -196,14 +196,17 @@ func findFencedBlocks(lines []string) []fencedBlock {
 // returns its info-string (the optional language tag, e.g. "json", or
 // "" for an untagged fence). A valid opener is exactly three backticks
 // optionally followed by an info-string of [a-zA-Z0-9_-] characters and
-// nothing else. The strict info-string charset rejects unusual variants
-// ("``` json", trailing spaces) so the parser's notion of a fence
-// matches what conventional markdown renderers consider one.
+// nothing else. Leading and trailing whitespace on the line is tolerated
+// (LLMs and markdown renderers commonly emit indented or trailing-space
+// fences) — the line is trimmed before the strict-shape check. The strict
+// info-string charset rejects unusual variants like "``` json" with an
+// embedded space.
 func fenceOpenLang(line string) (string, bool) {
-	if !strings.HasPrefix(line, "```") {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "```") {
 		return "", false
 	}
-	rest := line[3:]
+	rest := trimmed[3:]
 	for _, r := range rest {
 		switch {
 		case r >= 'a' && r <= 'z':

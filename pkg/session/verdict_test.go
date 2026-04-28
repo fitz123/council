@@ -345,7 +345,11 @@ func TestVerdict_AnswerExtractionOmittedWhenNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshalVerdict: %v", err)
 	}
-	if strings.Contains(string(buf), "answer_extraction") {
+	var got map[string]any
+	if err := json.Unmarshal(buf, &got); err != nil {
+		t.Fatalf("unmarshal verdict: %v", err)
+	}
+	if _, present := got["answer_extraction"]; present {
 		t.Errorf("answer_extraction key present when AnswerExtraction is nil:\n%s", buf)
 	}
 }

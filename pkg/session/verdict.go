@@ -44,11 +44,15 @@ type Verdict struct {
 // AnswerExtraction is the per-run record of how output.md / verdict.answer
 // was produced from the winner's R2 body (ADR-0014). Status is one of
 // "ok" | "fallback_no_json" | "fallback_invalid_json" |
-// "fallback_missing_answer" | "fallback_empty_answer". WinnerLabel is the
-// anonymized single-letter token of the winning expert. The struct is
-// pointer-typed and `omitempty` on Verdict so resumed sessions that predate
-// the field — and ties / non-voting terminal paths where extraction never
-// ran — serialize cleanly with no answer_extraction key.
+// "fallback_missing_answer" | "fallback_empty_answer" |
+// "fallback_unknown" (the last is a defensive catch-all emitted when an
+// unrecognised debate.ExtractStatus reaches the wire mapping; it should
+// never appear in practice but is documented here so the field is always
+// serialisable). WinnerLabel is the anonymized single-letter token of the
+// winning expert. The struct is pointer-typed and `omitempty` on Verdict so
+// resumed sessions that predate the field — and ties / non-voting terminal
+// paths where extraction never ran — serialize cleanly with no
+// answer_extraction key.
 type AnswerExtraction struct {
 	Status      string `json:"status"`
 	WinnerLabel string `json:"winner_label"`

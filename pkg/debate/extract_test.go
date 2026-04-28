@@ -277,6 +277,20 @@ func TestExtractAnswer(t *testing.T) {
 			wantStatus: ExtractOK,
 			wantAnswer: "trailing whitespace is fine",
 		},
+		{
+			// Markdown allows up to 3 leading spaces on a fence line, and
+			// LLMs frequently emit indented fences when the JSON block
+			// follows a bulleted/indented prose section. Both the open
+			// and close fences should tolerate leading and trailing
+			// whitespace so vendors don't silently fall back to raw R2.
+			name: "indented fence lines: extracts ok",
+			raw: "prose\n\n" +
+				"  ```json   \n" +
+				`{"answer": "indented fences are tolerated"}` + "\n" +
+				"   ```\n",
+			wantStatus: ExtractOK,
+			wantAnswer: "indented fences are tolerated",
+		},
 	}
 
 	for _, tc := range cases {
