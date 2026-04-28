@@ -370,9 +370,18 @@ type ExtractionOutcome struct {
 //
 // rounds/r2/<label>.txt is never touched: that file is the verbatim audit
 // record of what the expert produced.
-func SelectOutput(s *session.Session, result TallyResult, r2 []RoundOutput) (ExtractionOutcome, error) {
+//
+// reporter receives one OnStageDone call with Kind == "extraction" on the
+// unique-winner path AFTER output.md has been written, so the live
+// verbose stream can surface JSON-tail compliance per session. Nil is
+// normalized to NopReporter so callers that don't need streaming (most
+// tests) can pass nil.
+func SelectOutput(s *session.Session, result TallyResult, r2 []RoundOutput, reporter Reporter) (ExtractionOutcome, error) {
 	if s == nil {
 		return ExtractionOutcome{}, fmt.Errorf("SelectOutput: session required")
+	}
+	if reporter == nil {
+		reporter = NopReporter{}
 	}
 	if err := writeTallyJSON(s, result); err != nil {
 		return ExtractionOutcome{}, err
@@ -413,6 +422,7 @@ func SelectOutput(s *session.Session, result TallyResult, r2 []RoundOutput) (Ext
 		if err := os.WriteFile(path, []byte(published), 0o644); err != nil {
 			return ExtractionOutcome{}, fmt.Errorf("SelectOutput: write %s: %w", path, err)
 		}
+		reportExtraction(reporter, result.Winner, r.Name, status, published)
 		return ExtractionOutcome{WinnerLabel: result.Winner, Status: status, Answer: published}, nil
 	}
 

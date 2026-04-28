@@ -124,13 +124,13 @@ This is "Option A done right" (per the council session 2026-04-27T21-24-13Z-plea
 
 ### Task 5: Verbose-stream event for extraction outcome
 
-- [ ] in `pkg/debate/reporter.go` (or wherever stage events are defined), add an extraction event type carrying the winner label and the extraction status.
-- [ ] in `cmd/council/reporter.go`, add a renderer for the new event:
+- [x] in `pkg/debate/reporter.go` (or wherever stage events are defined), add an extraction event type carrying the winner label and the extraction status.
+- [x] in `cmd/council/reporter.go`, add a renderer for the new event:
   - On `ExtractOK`: `[hh:mm:ss] extracted clean answer from winner B (claude_expert): N chars`
   - On any fallback: `[hh:mm:ss] extraction fell back to raw R2 from winner B (claude_expert): <reason>`
-- [ ] emit the event from `SelectOutput` (or its caller) after the write completes.
-- [ ] write tests for `reporter_test.go` covering both lines.
-- [ ] run `go test ./...` — must pass before task 6.
+- [x] emit the event from `SelectOutput` (or its caller) after the write completes.
+- [x] write tests for `reporter_test.go` covering both lines.
+- [x] run `go test ./...` — must pass before task 6.
 
 ### Task 6: Verify acceptance criteria
 

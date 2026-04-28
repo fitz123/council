@@ -613,7 +613,7 @@ func TestSelectOutput_UniqueWinner_CopiesToOutputMd(t *testing.T) {
 		Winner:  "B",
 		Ballots: []Ballot{{VoterLabel: "A", VotedFor: "B"}, {VoterLabel: "B", VotedFor: "B"}, {VoterLabel: "C", VotedFor: "B"}},
 	}
-	outcome, err := SelectOutput(s, result, r2)
+	outcome, err := SelectOutput(s, result, r2, nil)
 	if err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
@@ -686,7 +686,7 @@ func TestSelectOutput_ThreeWayTie_CopiesPerLabel(t *testing.T) {
 			{VoterLabel: "C", VotedFor: "C"},
 		},
 	}
-	outcome, err := SelectOutput(s, result, r2)
+	outcome, err := SelectOutput(s, result, r2, nil)
 	if err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
@@ -728,7 +728,7 @@ func TestSelectOutput_TwoWayTie_N2(t *testing.T) {
 			{VoterLabel: "B", VotedFor: "B"},
 		},
 	}
-	if _, err := SelectOutput(s, result, r2); err != nil {
+	if _, err := SelectOutput(s, result, r2, nil); err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
 	for _, l := range []string{"A", "B"} {
@@ -763,7 +763,7 @@ func TestSelectOutput_Resume_TieToWinner_CleansStaleTiedOutputs(t *testing.T) {
 		Votes:  map[string]int{"A": 2, "B": 0},
 		Winner: "A",
 	}
-	if _, err := SelectOutput(s, result, r2); err != nil {
+	if _, err := SelectOutput(s, result, r2, nil); err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
 	body, err := os.ReadFile(filepath.Join(s.Path, "output.md"))
@@ -800,7 +800,7 @@ func TestSelectOutput_Resume_WinnerToTie_CleansStaleOutputMd(t *testing.T) {
 		Votes:          map[string]int{"A": 1, "B": 1},
 		TiedCandidates: []string{"A", "B"},
 	}
-	if _, err := SelectOutput(s, result, r2); err != nil {
+	if _, err := SelectOutput(s, result, r2, nil); err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(s.Path, "output.md")); !os.IsNotExist(err) {
@@ -841,7 +841,7 @@ func TestSelectOutput_Resume_TiedSetShrinks_CleansDroppedLabel(t *testing.T) {
 		Votes:          map[string]int{"A": 1, "B": 1, "C": 0},
 		TiedCandidates: []string{"A", "B"},
 	}
-	if _, err := SelectOutput(s, result, r2); err != nil {
+	if _, err := SelectOutput(s, result, r2, nil); err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(s.Path, "output-C.md")); !os.IsNotExist(err) {
@@ -898,13 +898,13 @@ func TestSelectOutput_MissingR2ForWinner_Error(t *testing.T) {
 		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
 	})
 	result := TallyResult{Winner: "X", Votes: map[string]int{"X": 1}}
-	if _, err := SelectOutput(s, result, []RoundOutput{{Label: "A"}}); err == nil {
+	if _, err := SelectOutput(s, result, []RoundOutput{{Label: "A"}}, nil); err == nil {
 		t.Fatal("expected error when winner label has no R2 output")
 	}
 }
 
 func TestSelectOutput_NilSession(t *testing.T) {
-	if _, err := SelectOutput(nil, TallyResult{Winner: "A"}, []RoundOutput{{Label: "A", Body: "x"}}); err == nil {
+	if _, err := SelectOutput(nil, TallyResult{Winner: "A"}, []RoundOutput{{Label: "A", Body: "x"}}, nil); err == nil {
 		t.Fatal("expected error for nil session")
 	}
 }
@@ -934,7 +934,7 @@ func TestSelectOutput_UniqueWinner_ExtractsCleanAnswer(t *testing.T) {
 		Votes:  map[string]int{"A": 0, "B": 3, "C": 0},
 		Winner: "B",
 	}
-	outcome, err := SelectOutput(s, result, r2)
+	outcome, err := SelectOutput(s, result, r2, nil)
 	if err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
@@ -977,7 +977,7 @@ func TestSelectOutput_UniqueWinner_NoJSONTail_FallsBackToRawR2(t *testing.T) {
 		{Label: "A", Participation: "ok", Body: winnerBody},
 	}
 	result := TallyResult{Votes: map[string]int{"A": 1}, Winner: "A"}
-	outcome, err := SelectOutput(s, result, r2)
+	outcome, err := SelectOutput(s, result, r2, nil)
 	if err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
@@ -1012,7 +1012,7 @@ func TestSelectOutput_UniqueWinner_MalformedJSON_FallsBackToRawR2(t *testing.T) 
 		{Label: "A", Participation: "ok", Body: winnerBody},
 	}
 	result := TallyResult{Votes: map[string]int{"A": 1}, Winner: "A"}
-	outcome, err := SelectOutput(s, result, r2)
+	outcome, err := SelectOutput(s, result, r2, nil)
 	if err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}
@@ -1050,7 +1050,7 @@ func TestSelectOutput_Tie_NoExtractionPerformed(t *testing.T) {
 		Votes:          map[string]int{"A": 1, "B": 1},
 		TiedCandidates: []string{"A", "B"},
 	}
-	outcome, err := SelectOutput(s, result, r2)
+	outcome, err := SelectOutput(s, result, r2, nil)
 	if err != nil {
 		t.Fatalf("SelectOutput: %v", err)
 	}

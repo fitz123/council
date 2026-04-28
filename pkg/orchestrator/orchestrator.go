@@ -217,7 +217,7 @@ func Run(ctx context.Context, profile *config.Profile, question string, sess *se
 	}
 
 	tally := debate.Tally(ballots, activeLabels)
-	outcome, err := debate.SelectOutput(sess, tally, r2)
+	outcome, err := debate.SelectOutput(sess, tally, r2, reporter)
 	if err != nil {
 		v.Status = "error"
 		return finalizeAndWrite(v, sess, startedAt, err)

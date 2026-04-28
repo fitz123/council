@@ -237,4 +237,116 @@ func TestReporter_NilTolerated(t *testing.T) {
 	if _, err := RunBallot(context.Background(), bcfg, "q?", "agg"); err != nil {
 		t.Fatalf("RunBallot with nil Reporter: %v", err)
 	}
+
+	// SelectOutput nil-Reporter path: must not panic when --verbose is off.
+	r2 := []RoundOutput{{Label: "A", Name: "expert_a", Participation: "ok", Body: "body\n"}}
+	if _, err := SelectOutput(s, TallyResult{Votes: map[string]int{"A": 1}, Winner: "A"}, r2, nil); err != nil {
+		t.Fatalf("SelectOutput with nil Reporter: %v", err)
+	}
+}
+
+// TestReporter_SelectOutput_FiresExtractionOnUniqueWinner pins that
+// SelectOutput emits exactly one Kind == "extraction" event on the
+// unique-winner path, with the winner's label + real name and the
+// JSON-tail extraction status. The event is what cmd/council renders
+// to the live verbose stream (ADR-0014 Task 5).
+func TestReporter_SelectOutput_FiresExtractionOnUniqueWinner(t *testing.T) {
+	s, _, _ := setupRoundTest(t, "abcd1234abcd1234", &testExec{
+		name: testExecName,
+		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
+	})
+	winnerBody := "prose body.\n\n```json\n{\"answer\": \"Clean.\"}\n```\n"
+	r2 := []RoundOutput{
+		{Label: "A", Name: "expert_a", Participation: "ok", Body: "A\n"},
+		{Label: "B", Name: "expert_b", Participation: "ok", Body: winnerBody},
+	}
+	result := TallyResult{Votes: map[string]int{"A": 0, "B": 2}, Winner: "B"}
+	rep := &recordingReporter{}
+	if _, err := SelectOutput(s, result, r2, rep); err != nil {
+		t.Fatalf("SelectOutput: %v", err)
+	}
+
+	events := rep.snapshot()
+	if got, want := len(events), 1; got != want {
+		t.Fatalf("len(events) = %d, want %d", got, want)
+	}
+	ev := events[0]
+	if ev.Kind != "extraction" {
+		t.Errorf("Kind = %q, want extraction", ev.Kind)
+	}
+	if ev.Label != "B" {
+		t.Errorf("Label = %q, want B", ev.Label)
+	}
+	if ev.RealName != "expert_b" {
+		t.Errorf("RealName = %q, want expert_b", ev.RealName)
+	}
+	if ev.ExtractStatus != ExtractOK {
+		t.Errorf("ExtractStatus = %v, want ExtractOK", ev.ExtractStatus)
+	}
+	if string(ev.Body) != "Clean.\n" {
+		t.Errorf("Body = %q, want \"Clean.\\n\" (extracted answer)", string(ev.Body))
+	}
+}
+
+// TestReporter_SelectOutput_FiresExtractionOnFallback pins the parallel
+// contract on the fail-closed path: the event still fires, with Body
+// carrying the raw R2 bytes (what landed in output.md) and ExtractStatus
+// reflecting the fallback reason.
+func TestReporter_SelectOutput_FiresExtractionOnFallback(t *testing.T) {
+	s, _, _ := setupRoundTest(t, "1234abcd1234abcd", &testExec{
+		name: testExecName,
+		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
+	})
+	rawBody := "raw R2 with no JSON tail at all.\n"
+	r2 := []RoundOutput{
+		{Label: "A", Name: "expert_a", Participation: "ok", Body: rawBody},
+	}
+	result := TallyResult{Votes: map[string]int{"A": 1}, Winner: "A"}
+	rep := &recordingReporter{}
+	if _, err := SelectOutput(s, result, r2, rep); err != nil {
+		t.Fatalf("SelectOutput: %v", err)
+	}
+
+	events := rep.snapshot()
+	if got, want := len(events), 1; got != want {
+		t.Fatalf("len(events) = %d, want %d", got, want)
+	}
+	ev := events[0]
+	if ev.Kind != "extraction" {
+		t.Errorf("Kind = %q, want extraction", ev.Kind)
+	}
+	if ev.ExtractStatus != ExtractNoJSONBlock {
+		t.Errorf("ExtractStatus = %v, want ExtractNoJSONBlock", ev.ExtractStatus)
+	}
+	if string(ev.Body) != rawBody {
+		t.Errorf("Body = %q, want raw R2 body verbatim", string(ev.Body))
+	}
+}
+
+// TestReporter_SelectOutput_NoExtractionEventOnTie pins that ties never
+// emit an extraction event — extraction is unique-winner-only, so a tie
+// stage produces zero extraction events.
+func TestReporter_SelectOutput_NoExtractionEventOnTie(t *testing.T) {
+	s, _, _ := setupRoundTest(t, "feedfacefeedface", &testExec{
+		name: testExecName,
+		fn:   func(ctx context.Context, req executor.Request, _ int) (string, error) { return "", nil },
+	})
+	r2 := []RoundOutput{
+		{Label: "A", Name: "expert_a", Participation: "ok", Body: "A\n"},
+		{Label: "B", Name: "expert_b", Participation: "ok", Body: "B\n"},
+	}
+	result := TallyResult{
+		Votes:          map[string]int{"A": 1, "B": 1},
+		TiedCandidates: []string{"A", "B"},
+	}
+	rep := &recordingReporter{}
+	if _, err := SelectOutput(s, result, r2, rep); err != nil {
+		t.Fatalf("SelectOutput: %v", err)
+	}
+
+	for _, ev := range rep.snapshot() {
+		if ev.Kind == "extraction" {
+			t.Errorf("unexpected extraction event on tie: %+v", ev)
+		}
+	}
 }
