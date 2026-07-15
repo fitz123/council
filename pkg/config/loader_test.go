@@ -489,7 +489,7 @@ experts: [this, is, wrong
 name: default
 judge:
   executor: claude-code
-  model: opus
+  model: fable
   prompt_file: prompts/judge.md
   timeout: 300s
 experts:
@@ -509,7 +509,7 @@ max_retries: 0
 name: default
 judge:
   executor: claude-code
-  model: opus
+  model: fable
   prompt_file: prompts/judge.md
   timeout: 300s
 experts:
@@ -529,7 +529,7 @@ max_retries: 0
 name: default
 judge:
   executor: claude-code
-  model: opus
+  model: fable
   prompt_file: prompts/independent.md
   timeout: 300s
 experts:

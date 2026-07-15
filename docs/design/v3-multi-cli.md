@@ -34,7 +34,7 @@ name: default
 experts:
   - name: claude_expert
     executor: claude-code
-    model: opus
+    model: fable
     prompt_file: prompts/independent.md
     timeout: 300s
   - name: codex_expert

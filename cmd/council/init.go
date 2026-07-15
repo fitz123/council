@@ -61,7 +61,7 @@ type candidate struct {
 // added here in one place; everything downstream (detection, YAML
 // emission, summary lines) iterates this list.
 var initCandidates = []candidate{
-	{expertName: "claude_expert", executor: "claude-code", model: "opus"},
+	{expertName: "claude_expert", executor: "claude-code", model: "fable"},
 	{expertName: "codex_expert", executor: "codex", model: "gpt-5.5"},
 	{expertName: "gemini_expert", executor: "gemini-cli", model: "gemini-3.1-pro-preview"},
 }
