@@ -79,7 +79,7 @@ func (c *ClaudeCode) BinaryName() string { return "claude" }
 
 // MapModel translates the vendor-agnostic short name from profile YAML
 // to the value the CLI's --model flag expects. v1 mapping is identity
-// (haiku/sonnet/opus pass through unchanged); it lives on the type
+// (haiku/sonnet/fable pass through unchanged); it lives on the type
 // rather than as a free function so v2 can override it on a per-instance
 // basis if a model release ever needs translation.
 func (c *ClaudeCode) MapModel(model string) string { return model }

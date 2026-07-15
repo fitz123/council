@@ -53,7 +53,7 @@ type Executor interface {
 **Model naming (A2):** literal CLI model IDs in profile YAML;
 `MapModel` is identity for every executor. `Request.Model` doc:
 "literal CLI `--model` flag value, verbatim." Claude CLI aliases
-`sonnet`/`opus`/`haiku` server-side so profiles using those
+`sonnet`/`fable`/`haiku` server-side so profiles using those
 aliases work without translation.
 
 **Per-CLI AllowedTools translation:**

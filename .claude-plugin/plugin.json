@@ -1,6 +1,6 @@
 {
   "name": "council",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-expert CLI committee — fan a question to N expert CLIs, run a two-round debate, then vote on the answer",
   "author": {
     "name": "fitz123"

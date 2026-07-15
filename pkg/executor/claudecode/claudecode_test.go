@@ -143,7 +143,7 @@ func TestExecuteModelMappingIsIdentity(t *testing.T) {
 	// v1 contract: MapModel is identity. Test the three documented
 	// names plus a hypothetical future one to lock the behavior in.
 	c := &ClaudeCode{}
-	for _, m := range []string{"haiku", "sonnet", "opus", "sonnet-future"} {
+	for _, m := range []string{"haiku", "sonnet", "fable", "sonnet-future"} {
 		if got := c.MapModel(m); got != m {
 			t.Errorf("MapModel(%q) = %q, want identity", m, got)
 		}
