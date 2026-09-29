@@ -192,7 +192,10 @@ func TestInit_ProbeFnExcludesFailingCLI(t *testing.T) {
 	withInitTestEnv(t, tmp, map[string]bool{"claude": true, "codex": true, "gemini": true})
 	registerThree(t)
 
-	probe = func(_ context.Context, ex executor.Executor, _ string) (bool, string) {
+	probe = func(_ context.Context, ex executor.Executor, model string) (bool, string) {
+		if ex.Name() == "claude-code" && model != "opus" {
+			t.Errorf("claude-code probe model = %q, want opus", model)
+		}
 		if ex.Name() == "codex" {
 			return false, "no OK in probe output"
 		}
@@ -290,7 +293,10 @@ func TestInit_GeneratedYAMLRoundTripsThroughLoader(t *testing.T) {
 		t.Errorf("Version = %d, want 2", p.Version)
 	}
 	if len(p.Experts) != 3 {
-		t.Errorf("Experts count = %d, want 3", len(p.Experts))
+		t.Fatalf("Experts count = %d, want 3", len(p.Experts))
+	}
+	if p.Experts[0].Executor != "claude-code" || p.Experts[0].Model != "opus" {
+		t.Errorf("first expert executor/model = %q/%q, want claude-code/opus", p.Experts[0].Executor, p.Experts[0].Model)
 	}
 	if p.Quorum != 2 {
 		t.Errorf("Quorum = %d, want 2", p.Quorum)
